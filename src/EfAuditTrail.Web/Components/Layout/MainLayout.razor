@@ -1,0 +1,43 @@
+@inherits LayoutComponentBase
+@implements IDisposable
+@inject PersonaState State
+
+<div class="shell">
+    <header class="topbar">
+        <a class="brand" href="/">
+            <span class="brand-mark" aria-hidden="true">◆</span>
+            <span>EF Audit Trail <em>demo back office</em></span>
+        </a>
+        <nav class="nav">
+            <NavLink href="/" Match="NavLinkMatch.All">Audit trail</NavLink>
+            <NavLink href="/playground">Playground</NavLink>
+        </nav>
+        <label class="persona">
+            <span>Acting as</span>
+            <select value="@State.Current.Key" @onchange="OnPersonaChanged">
+                @foreach (var persona in Persona.All)
+                {
+                    <option value="@persona.Key">@persona.Label</option>
+                }
+            </select>
+        </label>
+    </header>
+
+    <main class="content">
+        @Body
+    </main>
+</div>
+
+<div id="blazor-error-ui" data-nosnippet>
+    Something went wrong. <a href="." class="reload">Reload</a>
+</div>
+
+@code {
+    protected override void OnInitialized() => State.Changed += OnChanged;
+
+    private void OnPersonaChanged(ChangeEventArgs e) => State.Select(e.Value?.ToString() ?? string.Empty);
+
+    private void OnChanged() => InvokeAsync(StateHasChanged);
+
+    public void Dispose() => State.Changed -= OnChanged;
+}

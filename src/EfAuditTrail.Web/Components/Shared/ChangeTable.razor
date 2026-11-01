@@ -1,0 +1,43 @@
+<table class="changes">
+    <thead>
+        <tr>
+            <th>Field</th>
+            <th>Before</th>
+            <th>After</th>
+        </tr>
+    </thead>
+    <tbody>
+        @if (Changes.Count == 0)
+        {
+            <tr><td colspan="3" class="muted">No audited fields — a key-only row was removed.</td></tr>
+        }
+        @foreach (var change in Changes)
+        {
+            <tr>
+                <td class="path">
+                    <code>@change.Path</code>
+                    @if (change.PersonalData)
+                    {
+                        <span class="badge pii" title="Listed in pii_paths">PII</span>
+                    }
+                </td>
+                @if (change.Masked)
+                {
+                    <td colspan="2" class="masked">•••• personal data — tick “Reveal personal data” to show</td>
+                }
+                else
+                {
+                    <td class="value old">@Render(change.Old)</td>
+                    <td class="value new">@Render(change.New)</td>
+                }
+            </tr>
+        }
+    </tbody>
+</table>
+
+@code {
+    [Parameter, EditorRequired]
+    public IReadOnlyList<AuditChangeDto> Changes { get; set; } = [];
+
+    private static string Render(string? json) => json ?? "∅";
+}

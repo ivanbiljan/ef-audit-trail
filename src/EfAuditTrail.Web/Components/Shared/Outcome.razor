@@ -1,0 +1,17 @@
+@if (Result is not null)
+{
+    <span class="outcome @(Result.Ok ? "ok" : "failed")">
+        @Result.Message
+        @if (Result.Link is not null)
+        {
+            <a href="@Result.Link">See audit entries →</a>
+        }
+    </span>
+}
+
+@code {
+    public sealed record Model(bool Ok, string Message, string? Link);
+
+    [Parameter]
+    public Model? Result { get; set; }
+}

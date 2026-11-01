@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" />
+    <PackageReference Include="EFCore.NamingConventions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Auditing\Triggers\audit.sql" LogicalName="EfAuditTrail.Data.Auditing.Triggers.audit.sql" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="EfAuditTrail.Tests.Unit" />
+    <InternalsVisibleTo Include="EfAuditTrail.Tests.Integration" />
+  </ItemGroup>
+
+</Project>

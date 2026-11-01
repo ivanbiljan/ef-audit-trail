@@ -1,0 +1,30 @@
+<div class="mode-toggle" role="radiogroup" aria-label="Audit approach">
+    @foreach (var mode in Modes)
+    {
+        <button type="button"
+                class="@(mode == Value ? "on" : null)"
+                role="radio"
+                aria-checked="@(mode == Value ? "true" : "false")"
+                title="@SourceBadge.Describe(mode)"
+                @onclick="() => SelectAsync(mode)">
+            @mode
+        </button>
+    }
+</div>
+
+@code {
+    private static readonly string[] Modes = ["Trigger", "Snapshot"];
+
+    [Parameter]
+    public string Value { get; set; } = "Trigger";
+
+    [Parameter]
+    public EventCallback<string> ValueChanged { get; set; }
+
+    private Task SelectAsync(string mode)
+    {
+        Value = mode;
+
+        return ValueChanged.InvokeAsync(mode);
+    }
+}

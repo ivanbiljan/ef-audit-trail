@@ -1,0 +1,14 @@
+<span class="badge source-@Source.ToLowerInvariant()" title="@Describe(Source)">@Source</span>
+
+@code {
+    [Parameter, EditorRequired]
+    public string Source { get; set; } = string.Empty;
+
+    public static string Describe(string source) => source switch
+    {
+        "Interceptor" => "EF SaveChanges interceptor — tracked entities",
+        "Trigger" => "Database trigger — ExecuteUpdate/ExecuteDelete, raw SQL, cascades",
+        "Snapshot" => "ExecuteAudited* — lock, snapshot before/after, diff in the app",
+        _ => source,
+    };
+}

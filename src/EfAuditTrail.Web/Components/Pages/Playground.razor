@@ -1,0 +1,282 @@
+@page "/playground"
+@inject AuditTrailApi Api
+@inject PersonaState State
+
+<PageTitle>Playground · EF Audit Trail</PageTitle>
+
+<section class="page-head">
+    <div>
+        <h1>Playground</h1>
+        <p class="lede">
+            Make changes as <strong>@State.Current.Display</strong> and watch where they land in the audit trail.
+            Bulk actions run either as a plain <code>ExecuteUpdate</code>/<code>ExecuteDelete</code> recorded by the
+            database <SourceBadge Source="Trigger" />, or through <code>ExecuteAudited*</code>, which snapshots and diffs
+            in the application <SourceBadge Source="Snapshot" />. Tracked saves go through the existing <SourceBadge Source="Interceptor" />.
+        </p>
+    </div>
+</section>
+
+@if (_error is not null)
+{
+    <p class="error">@_error</p>
+}
+
+<div class="cards">
+    <article class="card">
+        <header><h2>Rename a product</h2><SourceBadge Source="Interceptor" /></header>
+        <p>Load, modify, <code>SaveChanges</code> — the path you already audit.</p>
+        <label><span>Product</span>
+            <select @bind="_renameId">
+                @foreach (var product in _products)
+                {
+                    <option value="@product.Id">@product.Sku — @product.Name</option>
+                }
+            </select>
+        </label>
+        <label><span>New name</span><input @bind="_renameName" /></label>
+        <footer>
+            <button class="primary" disabled="@_busy" @onclick="RenameAsync">Save</button>
+            <Outcome Result="@Result("rename")" />
+        </footer>
+    </article>
+
+    <article class="card">
+        <header><h2>Update a delivery contact</h2><SourceBadge Source="Interceptor" /></header>
+        <p>Edits a branch of the jsonb profile. Expect leaf paths, PII-marked by <code>[AuditPii("/deliveryContact/**")]</code>; the language change is not personal.</p>
+        <label><span>Customer</span>
+            <select @bind="_contactCustomerId">
+                @foreach (var customer in _customers)
+                {
+                    <option value="@customer.Id">#@customer.Id @customer.FullName</option>
+                }
+            </select>
+        </label>
+        <div class="row2">
+            <label><span>Contact name</span><input @bind="_contactName" /></label>
+            <label><span>Phone</span><input @bind="_contactPhone" /></label>
+        </div>
+        <label><span>Language (optional)</span><input @bind="_language" placeholder="fr" /></label>
+        <footer>
+            <button class="primary" disabled="@_busy" @onclick="UpdateContactAsync">Save</button>
+            <Outcome Result="@Result("contact")" />
+        </footer>
+    </article>
+
+    <article class="card">
+        <header><h2>Adjust prices by category</h2><ModeToggle @bind-Value="_pricesMode" /></header>
+        <p>One <code>UPDATE … SET price = round(price * f, 2)</code> across a category.</p>
+        <div class="row2">
+            <label><span>Category</span>
+                <select @bind="_category">
+                    @foreach (var category in _categories)
+                    {
+                        <option value="@category">@category</option>
+                    }
+                </select>
+            </label>
+            <label><span>Percent</span><input type="number" step="0.5" @bind="_percent" /></label>
+        </div>
+        <footer>
+            <button class="primary" disabled="@_busy" @onclick="AdjustPricesAsync">Run</button>
+            <Outcome Result="@Result("prices")" />
+        </footer>
+    </article>
+
+    <article class="card">
+        <header><h2>Archive expired products</h2><ModeToggle @bind-Value="_archiveMode" /></header>
+        <p>Flips <code>status</code> to <code>Archived</code> where <code>available_until</code> has passed.</p>
+        <footer>
+            <button class="primary" disabled="@_busy" @onclick="ArchiveExpiredAsync">Run</button>
+            <Outcome Result="@Result("archive")" />
+        </footer>
+    </article>
+
+    <article class="card">
+        <header><h2>Cancel pending orders</h2><ModeToggle @bind-Value="_cancelMode" /></header>
+        <p>Bulk status change — and something for the purge to delete.</p>
+        <label><span>Product</span>
+            <select @bind="_cancelProductId">
+                <option value="0">All products</option>
+                @foreach (var product in _products)
+                {
+                    <option value="@product.Id">@product.Sku — @product.Name</option>
+                }
+            </select>
+        </label>
+        <footer>
+            <button class="primary" disabled="@_busy" @onclick="CancelPendingAsync">Run</button>
+            <Outcome Result="@Result("cancel")" />
+        </footer>
+    </article>
+
+    <article class="card">
+        <header><h2>Purge cancelled orders</h2><ModeToggle @bind-Value="_purgeMode" /></header>
+        <p>Bulk delete. Each row is snapshotted whole, the jsonb delivery details included (recipient names and phones are PII).</p>
+        <footer>
+            <button class="primary danger" disabled="@_busy" @onclick="PurgeAsync">Delete</button>
+            <Outcome Result="@Result("purge")" />
+        </footer>
+    </article>
+
+    <article class="card">
+        <header><h2>Upgrade a loyalty tier</h2><ModeToggle @bind-Value="_tierMode" /></header>
+        <p>Enum stored as text — run it once per mode and compare the rows: they are identical.</p>
+        <div class="row2">
+            <label><span>From</span>
+                <select @bind="_tierFrom">
+                    @foreach (var tier in Tiers) { <option value="@tier">@tier</option> }
+                </select>
+            </label>
+            <label><span>To</span>
+                <select @bind="_tierTo">
+                    @foreach (var tier in Tiers) { <option value="@tier">@tier</option> }
+                </select>
+            </label>
+        </div>
+        <footer>
+            <button class="primary" disabled="@_busy" @onclick="UpgradeTierAsync">Run</button>
+            <Outcome Result="@Result("tier")" />
+        </footer>
+    </article>
+
+    <article class="card">
+        <header><h2>Bump view counters</h2><span class="badge muted">no audit</span></header>
+        <p>A bulk write to an <code>[AuditIgnore]</code> column. The trigger sees the UPDATE and records nothing.</p>
+        <footer>
+            <button disabled="@_busy" @onclick="RecordViewsAsync">Run</button>
+            <Outcome Result="@Result("views")" />
+        </footer>
+    </article>
+
+    <article class="card">
+        <header><h2>Write from outside the app</h2><SourceBadge Source="Trigger" /></header>
+        <p>A fixed UPDATE over a separate connection with no interceptors — as psql would. No app context, so the
+            row's “who” is the database role and the channel is <code>Database</code>.</p>
+        <footer>
+            <button disabled="@_busy" @onclick="OutOfBandAsync">Run</button>
+            <Outcome Result="@Result("oob")" />
+        </footer>
+    </article>
+
+    <article class="card">
+        <header><h2>Generate a day of activity</h2><span class="badge muted">all paths</span></header>
+        <p>Replays the seeder's mix: several personas, every capture path.</p>
+        <footer>
+            <button disabled="@_busy" @onclick="GenerateAsync">Run</button>
+            <Outcome Result="@Result("activity")" />
+        </footer>
+    </article>
+</div>
+
+@code {
+    private static readonly string[] Tiers = ["Bronze", "Silver", "Gold", "Platinum"];
+
+    private readonly Dictionary<string, Outcome.Model> _results = [];
+    private List<ProductSummary> _products = [];
+    private List<CustomerSummary> _customers = [];
+    private string[] _categories = [];
+    private bool _busy;
+    private string? _error;
+
+    private int _renameId;
+    private string _renameName = "Trail Backpack 40L Pro";
+    private int _contactCustomerId;
+    private string _contactName = "Morgan Ellis";
+    private string _contactPhone = "+1 555 0199";
+    private string? _language;
+    private string _pricesMode = "Trigger";
+    private string _category = "Outdoor";
+    private decimal _percent = 5;
+    private string _archiveMode = "Trigger";
+    private string _cancelMode = "Snapshot";
+    private int _cancelProductId;
+    private string _purgeMode = "Snapshot";
+    private string _tierMode = "Trigger";
+    private string _tierFrom = "Bronze";
+    private string _tierTo = "Silver";
+
+    protected override async Task OnInitializedAsync() => await LoadReferenceDataAsync();
+
+    private async Task LoadReferenceDataAsync()
+    {
+        try
+        {
+            _products = await Api.GetProductsAsync();
+            _customers = await Api.GetCustomersAsync();
+            _categories = _products.Select(x => x.Category).Distinct().Order().ToArray();
+            _renameId = _renameId == 0 ? _products.FirstOrDefault()?.Id ?? 0 : _renameId;
+            _contactCustomerId = _contactCustomerId == 0 ? _customers.FirstOrDefault()?.Id ?? 0 : _contactCustomerId;
+            _category = _categories.Contains(_category) ? _category : _categories.FirstOrDefault() ?? _category;
+            _error = null;
+        }
+        catch (Exception ex) when (ex is ApiException or HttpRequestException)
+        {
+            _error = $"Could not reach the API: {ex.Message}";
+        }
+    }
+
+    private Outcome.Model? Result(string card) => _results.GetValueOrDefault(card);
+
+    private Task RenameAsync() => RunAsync("rename", "Products.RenameProduct", async () =>
+    {
+        var updated = await Api.RenameProductAsync(_renameId, _renameName);
+        return $"Saved “{updated.Name}”.";
+    });
+
+    private Task UpdateContactAsync() => RunAsync("contact", "Customers.UpdateDeliveryContact", async () =>
+    {
+        var rows = await Api.UpdateDeliveryContactAsync(_contactCustomerId, _contactName, _contactPhone, _language);
+        return $"{rows} row(s) saved.";
+    });
+
+    private Task AdjustPricesAsync() => RunAsync("prices", "Products.AdjustProductPrices", async () =>
+        Describe(await Api.AdjustPricesAsync(_category, _percent, _pricesMode)));
+
+    private Task ArchiveExpiredAsync() => RunAsync("archive", "Products.ArchiveExpiredProducts", async () =>
+        Describe(await Api.ArchiveExpiredAsync(_archiveMode)));
+
+    private Task CancelPendingAsync() => RunAsync("cancel", "Orders.CancelPendingOrders", async () =>
+        Describe(await Api.CancelPendingOrdersAsync(_cancelProductId == 0 ? null : _cancelProductId, _cancelMode)));
+
+    private Task PurgeAsync() => RunAsync("purge", "Orders.PurgeCancelledOrders", async () =>
+        Describe(await Api.PurgeCancelledOrdersAsync(_purgeMode)));
+
+    private Task UpgradeTierAsync() => RunAsync("tier", "Customers.UpgradeLoyaltyTier", async () =>
+        Describe(await Api.UpgradeLoyaltyTierAsync(_tierFrom, _tierTo, _tierMode)));
+
+    private Task RecordViewsAsync() => RunAsync("views", null, async () =>
+        $"{await Api.RecordViewsAsync()} row(s) updated — and no audit entries.");
+
+    private Task OutOfBandAsync() => RunAsync("oob", "unattributed", async () =>
+        $"{await Api.RunOutOfBandSqlAsync()} row(s) updated behind the app's back.");
+
+    private Task GenerateAsync() => RunAsync("activity", null, async () =>
+    {
+        var steps = await Api.GenerateActivityAsync();
+        return string.Join(" · ", steps.Select(s => $"{s.Operation}: {s.RowsAffected} ({s.ExpectedSource})"));
+    });
+
+    private static string Describe(BulkResult result)
+        => $"{result.RowsAffected} row(s) affected via {result.Mode}.";
+
+    private async Task RunAsync(string card, string? operation, Func<Task<string>> action)
+    {
+        _busy = true;
+        _results.Remove(card);
+
+        try
+        {
+            var message = await action();
+            _results[card] = new Outcome.Model(true, message, operation is null ? "/" : $"/?operation={Uri.EscapeDataString(operation)}");
+            await LoadReferenceDataAsync();
+        }
+        catch (Exception ex) when (ex is ApiException or HttpRequestException)
+        {
+            _results[card] = new Outcome.Model(false, ex.Message, null);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

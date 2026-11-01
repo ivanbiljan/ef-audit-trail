@@ -1,0 +1,363 @@
+@page "/"
+@implements IDisposable
+@inject AuditTrailApi Api
+@inject NavigationManager Navigation
+
+<PageTitle>Audit trail · EF Audit Trail</PageTitle>
+
+<section class="page-head">
+    <div>
+        <h1>Audit trail</h1>
+        <p class="lede">Who changed what, and when — one feed, whichever path captured it.</p>
+    </div>
+    <label class="switch">
+        <input type="checkbox" checked="@_live" @onchange="ToggleLiveAsync" />
+        <span>Live (5 s)</span>
+    </label>
+</section>
+
+@if (_facets is not null)
+{
+    <section class="tiles">
+        <button class="tile @(Source is null ? "on" : null)" @onclick="() => FilterSourceAsync(null)">
+            <span class="tile-count">@_facets.Total</span>
+            <span class="tile-label">All entries</span>
+        </button>
+        @foreach (var source in _facets.Sources)
+        {
+            <button class="tile tile-@source.Value.ToLowerInvariant() @(Source == source.Value ? "on" : null)"
+                    title="@SourceBadge.Describe(source.Value)"
+                    @onclick="() => FilterSourceAsync(source.Value)">
+                <span class="tile-count">@source.Count</span>
+                <span class="tile-label">@source.Value</span>
+            </button>
+        }
+    </section>
+}
+
+<form class="filters" @onsubmit="ApplyFiltersAsync" @onsubmit:preventDefault>
+    <label>
+        <span>Entity</span>
+        <select @bind="_entityType">
+            <option value="">Any</option>
+            @foreach (var type in _facets?.EntityTypes ?? [])
+            {
+                <option value="@type.Value">@type.Value (@type.Count)</option>
+            }
+        </select>
+    </label>
+    <label>
+        <span>Key</span>
+        <input @bind="_entityKey" placeholder="e.g. 3" size="6" />
+    </label>
+    <label>
+        <span>Action</span>
+        <select @bind="_action">
+            <option value="">Any</option>
+            <option value="Update">Update</option>
+            <option value="Delete">Delete</option>
+        </select>
+    </label>
+    <label>
+        <span>Operation</span>
+        <select @bind="_operation">
+            <option value="">Any</option>
+            @foreach (var operation in _facets?.Operations ?? [])
+            {
+                <option value="@operation.Value">@operation.Value (@operation.Count)</option>
+            }
+        </select>
+    </label>
+    <label class="grow">
+        <span>Actor</span>
+        <input @bind="_actor" placeholder="name contains…" />
+    </label>
+    <label class="check">
+        <input type="checkbox" @bind="_reveal" />
+        <span>Reveal personal data</span>
+    </label>
+    <div class="actions">
+        <button type="submit" class="primary">Apply</button>
+        <button type="button" @onclick="ClearAsync">Clear</button>
+    </div>
+</form>
+
+@if (_error is not null)
+{
+    <p class="error">@_error</p>
+}
+
+@if (_items.Count == 0 && !_loading)
+{
+    <section class="panel empty">
+        <p>No audit entries match. Run something from the <a href="/playground">playground</a>.</p>
+    </section>
+}
+else
+{
+    <table class="feed">
+        <thead>
+            <tr>
+                <th>When (UTC)</th>
+                <th>Source</th>
+                <th>Action</th>
+                <th>Entity</th>
+                <th>Who</th>
+                <th>Channel</th>
+                <th>Operation</th>
+                <th>Fields</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var entry in _items)
+            {
+                var open = _expanded.Contains(entry.Id);
+                <tr class="row @(open ? "open" : null) action-@entry.Action.ToLowerInvariant()" @onclick="() => Toggle(entry.Id)">
+                    <td class="when">@entry.OccurredAt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)</td>
+                    <td><SourceBadge Source="@entry.Source" /></td>
+                    <td><span class="badge action">@entry.Action</span></td>
+                    <td>
+                        <a href="@HistoryLink(entry)" @onclick:stopPropagation>@entry.EntityType #@entry.EntityKey</a>
+                    </td>
+                    <td>
+                        <div class="who">@(entry.ActorDisplay ?? "—")</div>
+                        <div class="muted small">
+                            @ActorLine(entry)
+                            @if (entry.OnBehalfOfCustomerId is { } customer)
+                            {
+                                <span> · for customer #@customer</span>
+                            }
+                        </div>
+                    </td>
+                    <td>@entry.Channel</td>
+                    <td><code>@entry.Operation</code></td>
+                    <td class="fields">
+                        @FieldsSummary(entry)
+                    </td>
+                </tr>
+                @if (open)
+                {
+                    <tr class="detail">
+                        <td colspan="8">
+                            <div class="detail-grid">
+                                <ChangeTable Changes="entry.Changes" />
+                                <dl class="meta">
+                                    <dt>Audit id</dt><dd>@entry.Id</dd>
+                                    <dt>Company</dt><dd>@(entry.CompanyId?.ToString(CultureInfo.InvariantCulture) ?? "—")</dd>
+                                    <dt>IP address</dt><dd>@(entry.IpAddress ?? "—")</dd>
+                                    <dt>User agent</dt><dd>@(entry.UserAgent ?? "—")</dd>
+                                    <dt>Captured by</dt><dd>@SourceBadge.Describe(entry.Source)</dd>
+                                </dl>
+                            </div>
+                        </td>
+                    </tr>
+                }
+            }
+        </tbody>
+    </table>
+
+    @if (_nextBefore is not null)
+    {
+        <div class="more">
+            <button @onclick="LoadMoreAsync" disabled="@_loading">Load older entries</button>
+        </div>
+    }
+}
+
+@code {
+    [SupplyParameterFromQuery] public string? EntityType { get; set; }
+
+    [SupplyParameterFromQuery] public string? EntityKey { get; set; }
+
+    [SupplyParameterFromQuery] public string? Source { get; set; }
+
+    [SupplyParameterFromQuery] public string? Operation { get; set; }
+
+    private readonly List<AuditEntryDto> _items = [];
+    private readonly HashSet<long> _expanded = [];
+    private AuditFacets? _facets;
+    private long? _nextBefore;
+    private bool _loading;
+    private string? _error;
+
+    private string? _entityType;
+    private string? _entityKey;
+    private string? _action;
+    private string? _operation;
+    private string? _actor;
+    private bool _reveal;
+
+    private bool _live;
+    private PeriodicTimer? _timer;
+    private CancellationTokenSource? _liveCts;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _entityType = EntityType;
+        _entityKey = EntityKey;
+        _operation = Operation;
+        await ReloadAsync();
+    }
+
+    private AuditFeedQuery Query(long? before = null) => new(
+        EntityType: Blank(_entityType),
+        EntityKey: Blank(_entityKey),
+        Source: Blank(Source),
+        Action: Blank(_action),
+        Actor: Blank(_actor),
+        Operation: Blank(_operation),
+        Before: before,
+        RevealPersonalData: _reveal);
+
+    private async Task ReloadAsync()
+    {
+        _loading = true;
+        _error = null;
+
+        try
+        {
+            _facets = await Api.GetFacetsAsync();
+            var page = await Api.GetFeedAsync(Query());
+            _items.Clear();
+            _items.AddRange(page.Items);
+            _nextBefore = page.NextBefore;
+        }
+        catch (Exception ex) when (ex is ApiException or HttpRequestException)
+        {
+            _error = $"Could not load the audit trail: {ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task LoadMoreAsync()
+    {
+        _loading = true;
+
+        try
+        {
+            var page = await Api.GetFeedAsync(Query(_nextBefore));
+            _items.AddRange(page.Items);
+            _nextBefore = page.NextBefore;
+        }
+        catch (Exception ex) when (ex is ApiException or HttpRequestException)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    // Filters that live in the URL (shareable links from the playground) go through navigation; the rest reload in place.
+    private Task ApplyFiltersAsync()
+    {
+        var target = Navigation.GetUriWithQueryParameters(Navigation.BaseUri, new Dictionary<string, object?>
+        {
+            ["entityType"] = Blank(_entityType),
+            ["entityKey"] = Blank(_entityKey),
+            ["source"] = Blank(Source),
+            ["operation"] = Blank(_operation),
+        });
+
+        if (Navigation.Uri == target)
+        {
+            return ReloadAsync();
+        }
+
+        Navigation.NavigateTo(target);
+
+        return Task.CompletedTask;
+    }
+
+    private Task FilterSourceAsync(string? source)
+    {
+        Navigation.NavigateTo(Navigation.GetUriWithQueryParameter("source", source));
+
+        return Task.CompletedTask;
+    }
+
+    private Task ClearAsync()
+    {
+        _action = null;
+        _actor = null;
+        _reveal = false;
+        Navigation.NavigateTo("/");
+
+        return ReloadAsync();
+    }
+
+    private void Toggle(long id)
+    {
+        if (!_expanded.Add(id))
+        {
+            _expanded.Remove(id);
+        }
+    }
+
+    private string HistoryLink(AuditEntryDto entry)
+        => Navigation.GetUriWithQueryParameters(Navigation.BaseUri, new Dictionary<string, object?>
+        {
+            ["entityType"] = entry.EntityType,
+            ["entityKey"] = entry.EntityKey,
+        });
+
+    private async Task ToggleLiveAsync(ChangeEventArgs e)
+    {
+        _live = e.Value is true;
+        _liveCts?.Cancel();
+        _timer?.Dispose();
+
+        if (!_live)
+        {
+            return;
+        }
+
+        _liveCts = new CancellationTokenSource();
+        _timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+        var token = _liveCts.Token;
+        var timer = _timer;
+
+        await ReloadAsync();
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while (await timer.WaitForNextTickAsync(token))
+                {
+                    await InvokeAsync(async () =>
+                    {
+                        await ReloadAsync();
+                        StateHasChanged();
+                    });
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Live view switched off or the circuit went away.
+            }
+        }, token);
+    }
+
+    private static string ActorLine(AuditEntryDto entry)
+        => entry.ActorId is { } id ? $"{entry.ActorKind} #{id}" : entry.ActorKind;
+
+    private static string FieldsSummary(AuditEntryDto entry)
+    {
+        var shown = string.Join(", ", entry.Changes.Select(c => c.Path).Take(3));
+
+        return entry.Changes.Count > 3 ? $"{shown} +{entry.Changes.Count - 3}" : shown;
+    }
+
+    private static string? Blank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    public void Dispose()
+    {
+        _liveCts?.Cancel();
+        _liveCts?.Dispose();
+        _timer?.Dispose();
+    }
+}

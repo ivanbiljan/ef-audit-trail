@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/EfAuditTrail.AppHost/EfAuditTrail.AppHost.csproj" />
+    <Project Path="src/EfAuditTrail.ServiceDefaults/EfAuditTrail.ServiceDefaults.csproj" />
+    <Project Path="src/EfAuditTrail.Data/EfAuditTrail.Data.csproj" />
+    <Project Path="src/EfAuditTrail.Migrator/EfAuditTrail.Migrator.csproj" />
+    <Project Path="src/EfAuditTrail.Api/EfAuditTrail.Api.csproj" />
+    <Project Path="src/EfAuditTrail.Web/EfAuditTrail.Web.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/EfAuditTrail.Tests.Unit/EfAuditTrail.Tests.Unit.csproj" />
+    <Project Path="tests/EfAuditTrail.Tests.Integration/EfAuditTrail.Tests.Integration.csproj" />
+    <Project Path="tests/EfAuditTrail.Tests.EndToEnd/EfAuditTrail.Tests.EndToEnd.csproj" />
+  </Folder>
+</Solution>
