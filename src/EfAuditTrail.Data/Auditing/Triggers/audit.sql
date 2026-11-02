@@ -108,7 +108,8 @@ declare
     v_key   text;
     v_count integer;
 begin
-    if v_old is null and v_new is null then
+    -- Most of a document is usually unchanged: don't walk equal subtrees.
+    if v_old is not distinct from v_new then
         return;
     end if;
 
@@ -118,6 +119,8 @@ begin
             union
             select k from jsonb_object_keys(coalesce(v_new, '{}'::jsonb)) as n(k)
         loop
+            continue when v_old -> v_key is not distinct from v_new -> v_key;
+
             return query
                 select * from audit.jsonb_delta(
                     p_path || '/' || replace(replace(v_key, '~', '~0'), '/', '~1'),
@@ -130,12 +133,10 @@ begin
     if coalesce(jsonb_typeof(v_old), 'array') = 'array' and coalesce(jsonb_typeof(v_new), 'array') = 'array' then
         v_count := greatest(coalesce(jsonb_array_length(v_old), 0), coalesce(jsonb_array_length(v_new), 0));
         for i in 0 .. v_count - 1 loop
+            continue when v_old -> i is not distinct from v_new -> i;
+
             return query select * from audit.jsonb_delta(p_path || '/' || i, v_old -> i, v_new -> i);
         end loop;
-        return;
-    end if;
-
-    if v_old is not distinct from v_new then
         return;
     end if;
 
@@ -196,6 +197,7 @@ declare
     v_cfg       audit.tracked_entity;
     v_deleted   boolean := p_op = 'DELETE';
     v_column    jsonb;
+    v_name      text;
     v_property  text;
     v_kind      text;
     v_patterns  jsonb;
@@ -212,11 +214,16 @@ begin
     end if;
 
     for v_column in select value from jsonb_array_elements(v_cfg.columns) loop
+        v_name := v_column ->> 'column';
+
+        -- Nearly every column of an update is unchanged: settle that before any per-column work.
+        continue when not v_deleted and p_old_row -> v_name is not distinct from p_new_row -> v_name;
+
         v_property := v_column ->> 'property';
         v_kind     := v_column ->> 'kind';
         v_patterns := v_column -> 'pii';
-        v_old      := audit.normalize(p_old_row -> (v_column ->> 'column'), v_kind);
-        v_new      := case when v_deleted then null else audit.normalize(p_new_row -> (v_column ->> 'column'), v_kind) end;
+        v_old      := audit.normalize(p_old_row -> v_name, v_kind);
+        v_new      := case when v_deleted then null else audit.normalize(p_new_row -> v_name, v_kind) end;
 
         if v_kind = 'json' and not v_deleted then
             -- An update of a jsonb column is diffed to its leaves; a delete snapshots it whole (below).
@@ -233,7 +240,7 @@ begin
         elsif v_deleted or v_old is distinct from v_new then
             v_changes := v_changes || jsonb_build_object(v_property, jsonb_build_object('old', v_old, 'new', v_new));
 
-            if audit.is_personal(v_patterns, '', audit.is_container(v_old) or audit.is_container(v_new)) then
+            if v_patterns <> 'null'::jsonb and audit.is_personal(v_patterns, '', audit.is_container(v_old) or audit.is_container(v_new)) then
                 v_pii_paths := v_pii_paths || to_jsonb(v_property);
             end if;
         end if;

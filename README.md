@@ -108,34 +108,37 @@ from `BuildRegistrations` into the migration.
 
 ## Cost
 
-The application no longer spends round trips on auditing, but every audited row now does its work in
-PL/pgSQL. Small saves on a remote database get faster, and large `SaveChanges` calls get slower.
+The application spends no round trips on most writes, and every audited row does its work in PL/pgSQL.
+Updates that leave jsonb columns alone cost about the same as writing audit rows from the application.
+Changes inside a jsonb document cost roughly twice as much.
 
-Measured against the previous design, which wrote `SaveChanges` rows from the application: median
-milliseconds, Release build, `postgres:16-alpine` in Docker with autovacuum off and a fresh connection per
-run. "5 ms" adds that delay to each client-to-server send.
+Measured against the previous design, where `SaveChanges` rows were written by the application and the
+same trigger handled bulk statements without today's shortcuts: median milliseconds, Release build,
+`postgres:16-alpine` in Docker with autovacuum off and a fresh connection per run. "5 ms" adds that delay
+to each client-to-server send.
 
 | Flow | Rows | Before | Now | Before, 5 ms | Now, 5 ms | Postgres CPU |
 |---|---:|---:|---:|---:|---:|---:|
-| `SaveChanges`, update one column | 1 | 3 | 5 | 18 | 9 | |
-| | 10 | 3 | 8 | 18 | 18 | |
-| | 100 | 24 | 38 | 28 | 45 | |
-| | 1,000 | 169 | 344 | 179 | 302 | 4.5× |
-| | 10,000 | 820 | 2,731 | 1,010 | 2,818 | 5.2× |
-| `SaveChanges`, jsonb with PII paths | 1,000 | 74 | 196 | 98 | 199 | 3.2× |
-| `SaveChanges`, delete | 5,000 | 376 | 558 | 479 | 585 | 2.1× |
-| `SaveChanges`, insert (not audited) | 5,000 | 246 | 217 | 300 | 262 | 0.9× |
-| `ExecuteUpdate` | 10,000 | 2,172 | 2,070 | 2,252 | 2,122 | 1.0× |
-| `ExecuteUpdate`, jsonb with PII paths | 10,000 | 1,335 | 1,343 | 1,362 | 1,349 | 1.0× |
-| `ExecuteDelete` | 10,000 | 826 | 831 | 854 | 864 | 1.0× |
-| `ExecuteDelete`, FK cascade | 10,100 | 476 | 470 | 505 | 498 | 1.0× |
-| 8 concurrent `SaveChanges` | 4,000 | 106 | 170 | | | 4.0× |
+| `SaveChanges`, update one column | 1 | 2.8 | 3.9 | 18 | 8.7 | |
+| | 10 | 3.3 | 5.2 | 18 | 15 | |
+| | 100 | 22 | 18 | 26 | 24 | |
+| | 1,000 | 72 | 86 | 96 | 94 | 1.4× |
+| | 10,000 | 806 | 808 | 1,000 | 843 | 1.5× |
+| `SaveChanges`, jsonb with PII paths | 1,000 | 70 | 152 | 92 | 163 | 2.5× |
+| `SaveChanges`, delete | 5,000 | 379 | 481 | 479 | 514 | 1.8× |
+| `SaveChanges`, insert (not audited) | 5,000 | 231 | 220 | 293 | 270 | 1.0× |
+| `ExecuteUpdate` | 10,000 | 2,068 | 405 | 2,093 | 429 | 0.2× |
+| `ExecuteUpdate`, jsonb with PII paths | 10,000 | 1,277 | 912 | 1,308 | 940 | 0.7× |
+| `ExecuteDelete` | 10,000 | 817 | 602 | 844 | 626 | 0.7× |
+| `ExecuteDelete`, FK cascade | 10,100 | 472 | 393 | 501 | 418 | 0.8× |
+| 8 concurrent `SaveChanges` | 4,000 | 116 | 130 | | | 1.5× |
 
-- Nearly all of the `SaveChanges` increase is the trigger. `audit.publish` takes about 24 ms per 10,000
-  calls, roughly 1% of it.
-- On a local connection the trigger always costs more than the round trips it saves. At 5 ms of delay,
-  saves break even at about 10 rows.
-- Bytes sent drop by about half for `SaveChanges` updates, and to under a quarter for deletes, because
+- **Unchanged data is the expensive case to get wrong.** Every update compares each audited column, and
+  walking an unchanged jsonb document was 75% of the trigger's time. `audit.record` now skips unchanged
+  columns before any per-column work, and `audit.jsonb_delta` skips equal subtrees.
+- **What remains is per-row PL/pgSQL.** The `INSERT` into `audit.entries` is about 7 µs of a row's cost and
+  `audit.publish` about 2 µs.
+- **Bytes sent drop** by about half for `SaveChanges` updates, and to under a quarter for deletes, because
   audit rows no longer cross the wire.
 
 ---
