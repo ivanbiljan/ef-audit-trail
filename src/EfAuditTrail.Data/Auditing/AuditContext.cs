@@ -3,7 +3,7 @@ using EfAuditTrail.Data.Entities;
 namespace EfAuditTrail.Data.Auditing;
 
 /// <summary>
-/// What the audit interceptor stamps onto every row it writes — one instance per request, circuit or job.
+/// What the audit trigger stamps onto every row it writes — one instance per request, circuit or job.
 /// Hosts fill in actor, channel, IP and UA when the scope opens; the Warp pipeline pushes the operation.
 /// </summary>
 public sealed class AuditContext

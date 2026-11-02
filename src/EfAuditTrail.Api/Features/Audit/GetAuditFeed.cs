@@ -15,7 +15,6 @@ namespace EfAuditTrail.Api.Features.Audit;
 public sealed record GetAuditFeed(
     [FromQuery] string? EntityType = null,
     [FromQuery] string? EntityKey = null,
-    [FromQuery] AuditSource? Source = null,
     [FromQuery] AuditAction? Action = null,
     [FromQuery] string? Actor = null,
     [FromQuery] string? Operation = null,
@@ -28,7 +27,6 @@ public sealed record AuditFeedPage(IReadOnlyList<AuditEntryDto> Items, long? Nex
 public sealed record AuditEntryDto(
     long Id,
     DateTime OccurredAt,
-    AuditSource Source,
     AuditAction Action,
     string EntityType,
     string EntityKey,
@@ -68,11 +66,6 @@ public sealed class GetAuditFeedHandler(EfAuditTrailDbContext db) : IRequestHand
         if (!string.IsNullOrWhiteSpace(request.EntityKey))
         {
             query = query.Where(x => x.EntityKey == request.EntityKey);
-        }
-
-        if (request.Source is { } source)
-        {
-            query = query.Where(x => x.Source == source);
         }
 
         if (request.Action is { } action)
@@ -125,7 +118,6 @@ public sealed class GetAuditFeedHandler(EfAuditTrailDbContext db) : IRequestHand
         return new AuditEntryDto(
             row.Id,
             DateTime.SpecifyKind(row.OccurredAt, DateTimeKind.Utc),
-            row.Source,
             row.Action,
             row.EntityType,
             row.EntityKey,

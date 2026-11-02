@@ -8,7 +8,7 @@
 <section class="page-head">
     <div>
         <h1>Audit trail</h1>
-        <p class="lede">Who changed what, and when — one feed, whichever path captured it.</p>
+        <p class="lede">Who changed what, and when.</p>
     </div>
     <label class="switch">
         <input type="checkbox" checked="@_live" @onchange="ToggleLiveAsync" />
@@ -19,19 +19,10 @@
 @if (_facets is not null)
 {
     <section class="tiles">
-        <button class="tile @(Source is null ? "on" : null)" @onclick="() => FilterSourceAsync(null)">
+        <div class="tile on">
             <span class="tile-count">@_facets.Total</span>
             <span class="tile-label">All entries</span>
-        </button>
-        @foreach (var source in _facets.Sources)
-        {
-            <button class="tile tile-@source.Value.ToLowerInvariant() @(Source == source.Value ? "on" : null)"
-                    title="@SourceBadge.Describe(source.Value)"
-                    @onclick="() => FilterSourceAsync(source.Value)">
-                <span class="tile-count">@source.Count</span>
-                <span class="tile-label">@source.Value</span>
-            </button>
-        }
+        </div>
     </section>
 }
 
@@ -99,7 +90,6 @@ else
         <thead>
             <tr>
                 <th>When (UTC)</th>
-                <th>Source</th>
                 <th>Action</th>
                 <th>Entity</th>
                 <th>Who</th>
@@ -114,7 +104,6 @@ else
                 var open = _expanded.Contains(entry.Id);
                 <tr class="row @(open ? "open" : null) action-@entry.Action.ToLowerInvariant()" @onclick="() => Toggle(entry.Id)">
                     <td class="when">@entry.OccurredAt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)</td>
-                    <td><SourceBadge Source="@entry.Source" /></td>
                     <td><span class="badge action">@entry.Action</span></td>
                     <td>
                         <a href="@HistoryLink(entry)" @onclick:stopPropagation>@entry.EntityType #@entry.EntityKey</a>
@@ -146,7 +135,6 @@ else
                                     <dt>Company</dt><dd>@(entry.CompanyId?.ToString(CultureInfo.InvariantCulture) ?? "—")</dd>
                                     <dt>IP address</dt><dd>@(entry.IpAddress ?? "—")</dd>
                                     <dt>User agent</dt><dd>@(entry.UserAgent ?? "—")</dd>
-                                    <dt>Captured by</dt><dd>@SourceBadge.Describe(entry.Source)</dd>
                                 </dl>
                             </div>
                         </td>
@@ -169,7 +157,6 @@ else
 
     [SupplyParameterFromQuery] public string? EntityKey { get; set; }
 
-    [SupplyParameterFromQuery] public string? Source { get; set; }
 
     [SupplyParameterFromQuery] public string? Operation { get; set; }
 
@@ -202,7 +189,6 @@ else
     private AuditFeedQuery Query(long? before = null) => new(
         EntityType: Blank(_entityType),
         EntityKey: Blank(_entityKey),
-        Source: Blank(Source),
         Action: Blank(_action),
         Actor: Blank(_actor),
         Operation: Blank(_operation),
@@ -259,7 +245,6 @@ else
         {
             ["entityType"] = Blank(_entityType),
             ["entityKey"] = Blank(_entityKey),
-            ["source"] = Blank(Source),
             ["operation"] = Blank(_operation),
         });
 
@@ -269,13 +254,6 @@ else
         }
 
         Navigation.NavigateTo(target);
-
-        return Task.CompletedTask;
-    }
-
-    private Task FilterSourceAsync(string? source)
-    {
-        Navigation.NavigateTo(Navigation.GetUriWithQueryParameter("source", source));
 
         return Task.CompletedTask;
     }

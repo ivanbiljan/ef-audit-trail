@@ -12,7 +12,7 @@ public sealed record DemoDatabase(string ConnectionString);
 
 public static class DataServiceCollectionExtensions
 {
-    /// <summary>Registers the context with both interceptors and the scoped <see cref="AuditContext"/> they read.
+    /// <summary>Registers the context with the session interceptor and the scoped <see cref="AuditContext"/> it reads.
     /// The host fills the audit context in when its scope opens (middleware, job, seeder).</summary>
     public static IServiceCollection AddEfAuditTrailData(
         this IServiceCollection services,
@@ -29,20 +29,16 @@ public static class DataServiceCollectionExtensions
     {
         services.AddSingleton(sp => new DemoDatabase(connectionString(sp)));
         services.AddScoped<AuditContext>();
-        services.AddScoped<AuditInterceptor>();
         services.AddScoped<AuditSessionInterceptor>();
 
-        // Plain AddDbContext (Warp needs the scoped context, not only a factory), connection string rather
-        // than a data source (the snapshot path re-points a scratch context at the caller's connection), and
-        // no retrying execution strategy (a user transaction would need wrapping on every call site).
+        // Plain AddDbContext (Warp needs the scoped context, not only a factory) and no retrying execution
+        // strategy (a user transaction would need wrapping on every call site).
         services.AddDbContext<EfAuditTrailDbContext>((sp, options) =>
         {
             options
                 .UseNpgsql(sp.GetRequiredService<DemoDatabase>().ConnectionString)
                 .UseSnakeCaseNamingConvention()
-                .AddInterceptors(
-                    sp.GetRequiredService<AuditInterceptor>(),
-                    sp.GetRequiredService<AuditSessionInterceptor>());
+                .AddInterceptors(sp.GetRequiredService<AuditSessionInterceptor>());
 
             configure?.Invoke(options);
         });

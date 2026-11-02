@@ -1,18 +1,18 @@
-using EfAuditTrail.Api.Features.Shared;
 using EfAuditTrail.Data;
 using EfAuditTrail.Data.Entities;
+using Microsoft.EntityFrameworkCore;
 using Warp.Core.Handlers;
 using Warp.Http;
 
 namespace EfAuditTrail.Api.Features.Orders;
 
 /// <summary>Cancels the pending orders of a product (or all) — gives "purge cancelled" something to delete.</summary>
-public sealed record CancelPendingOrders(int? ProductId, BulkAuditMode Mode) : IRequest<BulkResult>;
+public sealed record CancelPendingOrders(int? ProductId) : IRequest<int>;
 
 [WarpHttpPost("/api/orders/cancel-pending")]
-public sealed class CancelPendingOrdersHandler(EfAuditTrailDbContext db) : IRequestHandler<CancelPendingOrders, BulkResult>
+public sealed class CancelPendingOrdersHandler(EfAuditTrailDbContext db) : IRequestHandler<CancelPendingOrders, int>
 {
-    public async Task<BulkResult> HandleAsync(CancelPendingOrders request, CancellationToken cancellationToken)
+    public Task<int> HandleAsync(CancelPendingOrders request, CancellationToken cancellationToken)
     {
         var now = DateTime.UtcNow;
         var pending = db.Orders.Where(x => x.Status == OrderStatus.Pending);
@@ -21,16 +21,12 @@ public sealed class CancelPendingOrdersHandler(EfAuditTrailDbContext db) : IRequ
             pending = pending.Where(x => x.ProductId == productId);
         }
 
-        var affected = await request.Mode.UpdateAsync(
-            pending,
-            db,
+        return pending.ExecuteUpdateAsync(
             s =>
             {
                 s.SetProperty(x => x.Status, OrderStatus.Cancelled);
                 s.SetProperty(x => x.UpdatedAt, now);
             },
             cancellationToken);
-
-        return new BulkResult(affected, request.Mode);
     }
 }

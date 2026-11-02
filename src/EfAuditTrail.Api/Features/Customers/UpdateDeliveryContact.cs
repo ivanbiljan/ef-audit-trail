@@ -7,7 +7,7 @@ using Warp.Http;
 
 namespace EfAuditTrail.Api.Features.Customers;
 
-/// <summary>Edits one branch of the jsonb profile through SaveChanges: the interceptor records leaf paths
+/// <summary>Edits one branch of the jsonb profile through SaveChanges: the trigger records leaf paths
 /// (<c>Profile/deliveryContact/phone</c>) and marks them personal via <c>[AuditPii("/deliveryContact/**")]</c>.</summary>
 public sealed record UpdateDeliveryContact(int CustomerId, string Name, string Phone, string? Language) : IRequest<int>;
 

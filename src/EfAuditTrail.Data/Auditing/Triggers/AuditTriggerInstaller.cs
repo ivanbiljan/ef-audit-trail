@@ -8,7 +8,7 @@ namespace EfAuditTrail.Data.Auditing.Triggers;
 
 /// <summary>One audited column as the trigger sees it.</summary>
 /// <param name="Column">Store column name.</param>
-/// <param name="Property">CLR property name — the <c>changes</c> key, same as the interceptor's.</param>
+/// <param name="Property">CLR property name — the <c>changes</c> key.</param>
 /// <param name="Kind"><c>value</c>, <c>json</c> (leaf diff), <c>timestamptz</c> or <c>timestamp</c> (formatted like System.Text.Json).</param>
 /// <param name="Pii">Null when not personal data; empty for the whole value; else JSON-pointer patterns.</param>
 public sealed record AuditColumn(
@@ -32,7 +32,7 @@ public sealed record AuditTableRegistration(
 /// Installs the trigger machinery (<c>audit.sql</c>) and registers every audited entity's table with it.
 /// The registrations are derived from the finalized EF model — the runtime annotations
 /// <see cref="AuditConvention"/> wrote from <see cref="AuditIgnoreAttribute"/>, <see cref="AuditPiiAttribute"/>
-/// and <c>jsonb</c> column types — so the trigger and the interceptor can never disagree about what is audited.
+/// and <c>jsonb</c> column types — so the attributes stay the single source of truth for what is audited.
 /// Run it after the schema exists: from the migrator, or from a migration via <see cref="InstallScript"/>.
 /// </summary>
 public static class AuditTriggerInstaller

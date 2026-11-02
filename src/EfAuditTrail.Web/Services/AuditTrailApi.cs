@@ -11,7 +11,6 @@ public sealed record AuditFeedPage(IReadOnlyList<AuditEntryDto> Items, long? Nex
 public sealed record AuditEntryDto(
     long Id,
     DateTime OccurredAt,
-    string Source,
     string Action,
     string EntityType,
     string EntityKey,
@@ -28,7 +27,7 @@ public sealed record AuditEntryDto(
 
 public sealed record AuditChangeDto(string Path, string? Old, string? New, bool PersonalData, bool Masked);
 
-public sealed record AuditFacets(int Total, IReadOnlyList<FacetCount> EntityTypes, IReadOnlyList<FacetCount> Sources, IReadOnlyList<FacetCount> Operations);
+public sealed record AuditFacets(int Total, IReadOnlyList<FacetCount> EntityTypes, IReadOnlyList<FacetCount> Operations);
 
 public sealed record FacetCount(string Value, int Count);
 
@@ -36,14 +35,11 @@ public sealed record ProductSummary(int Id, string Sku, string Name, string Cate
 
 public sealed record CustomerSummary(int Id, string FullName, string LoyaltyTier);
 
-public sealed record BulkResult(int RowsAffected, string Mode);
-
-public sealed record ActivityStep(string Operation, string ExpectedSource, int RowsAffected);
+public sealed record ActivityStep(string Operation, int RowsAffected);
 
 public sealed record AuditFeedQuery(
     string? EntityType = null,
     string? EntityKey = null,
-    string? Source = null,
     string? Action = null,
     string? Actor = null,
     string? Operation = null,
@@ -65,7 +61,6 @@ public sealed class AuditTrailApi(HttpClient http, PersonaState persona)
         {
             ["entityType"] = query.EntityType,
             ["entityKey"] = query.EntityKey,
-            ["source"] = query.Source,
             ["action"] = query.Action,
             ["actor"] = query.Actor,
             ["operation"] = query.Operation,
@@ -93,26 +88,26 @@ public sealed class AuditTrailApi(HttpClient http, PersonaState persona)
     public Task<ProductSummary> RenameProductAsync(int id, string name)
         => PostAsync<ProductSummary>("/api/products/rename", new { id, name });
 
-    public Task<BulkResult> AdjustPricesAsync(string category, decimal percent, string mode)
-        => PostAsync<BulkResult>("/api/products/adjust-prices", new { category, percent, mode });
+    public Task<int> AdjustPricesAsync(string category, decimal percent)
+        => PostAsync<int>("/api/products/adjust-prices", new { category, percent });
 
-    public Task<BulkResult> ArchiveExpiredAsync(string mode)
-        => PostAsync<BulkResult>("/api/products/archive-expired", new { mode });
+    public Task<int> ArchiveExpiredAsync()
+        => PostAsync<int>("/api/products/archive-expired", new { });
 
     public Task<int> RecordViewsAsync()
         => PostAsync<int>("/api/products/record-views", new { });
 
-    public Task<BulkResult> CancelPendingOrdersAsync(int? productId, string mode)
-        => PostAsync<BulkResult>("/api/orders/cancel-pending", new { productId, mode });
+    public Task<int> CancelPendingOrdersAsync(int? productId)
+        => PostAsync<int>("/api/orders/cancel-pending", new { productId });
 
-    public Task<BulkResult> PurgeCancelledOrdersAsync(string mode)
-        => PostAsync<BulkResult>("/api/orders/purge-cancelled", new { mode });
+    public Task<int> PurgeCancelledOrdersAsync()
+        => PostAsync<int>("/api/orders/purge-cancelled", new { });
 
     public Task<int> UpdateDeliveryContactAsync(int customerId, string name, string phone, string? language)
         => PostAsync<int>("/api/customers/delivery-contact", new { customerId, name, phone, language });
 
-    public Task<BulkResult> UpgradeLoyaltyTierAsync(string from, string to, string mode)
-        => PostAsync<BulkResult>("/api/customers/upgrade-tier", new { from, to, mode });
+    public Task<int> UpgradeLoyaltyTierAsync(string from, string to)
+        => PostAsync<int>("/api/customers/upgrade-tier", new { from, to });
 
     public Task<int> RunOutOfBandSqlAsync()
         => PostAsync<int>("/api/playground/out-of-band", new { });

@@ -9,9 +9,8 @@
         <h1>Playground</h1>
         <p class="lede">
             Make changes as <strong>@State.Current.Display</strong> and watch where they land in the audit trail.
-            Bulk actions run either as a plain <code>ExecuteUpdate</code>/<code>ExecuteDelete</code> recorded by the
-            database <SourceBadge Source="Trigger" />, or through <code>ExecuteAudited*</code>, which snapshots and diffs
-            in the application <SourceBadge Source="Snapshot" />. Tracked saves go through the existing <SourceBadge Source="Interceptor" />.
+            Every update and delete is recorded by the database trigger, whichever way it reaches the table:
+            tracked saves, <code>ExecuteUpdate</code>/<code>ExecuteDelete</code>, or SQL from outside the application.
         </p>
     </div>
 </section>
@@ -23,8 +22,8 @@
 
 <div class="cards">
     <article class="card">
-        <header><h2>Rename a product</h2><SourceBadge Source="Interceptor" /></header>
-        <p>Load, modify, <code>SaveChanges</code> — the path you already audit.</p>
+        <header><h2>Rename a product</h2><span class="badge muted">SaveChanges</span></header>
+        <p>Load, modify, <code>SaveChanges</code>.</p>
         <label><span>Product</span>
             <select @bind="_renameId">
                 @foreach (var product in _products)
@@ -41,7 +40,7 @@
     </article>
 
     <article class="card">
-        <header><h2>Update a delivery contact</h2><SourceBadge Source="Interceptor" /></header>
+        <header><h2>Update a delivery contact</h2><span class="badge muted">SaveChanges</span></header>
         <p>Edits a branch of the jsonb profile. Expect leaf paths, PII-marked by <code>[AuditPii("/deliveryContact/**")]</code>; the language change is not personal.</p>
         <label><span>Customer</span>
             <select @bind="_contactCustomerId">
@@ -63,7 +62,7 @@
     </article>
 
     <article class="card">
-        <header><h2>Adjust prices by category</h2><ModeToggle @bind-Value="_pricesMode" /></header>
+        <header><h2>Adjust prices by category</h2><span class="badge muted">bulk</span></header>
         <p>One <code>UPDATE … SET price = round(price * f, 2)</code> across a category.</p>
         <div class="row2">
             <label><span>Category</span>
@@ -83,7 +82,7 @@
     </article>
 
     <article class="card">
-        <header><h2>Archive expired products</h2><ModeToggle @bind-Value="_archiveMode" /></header>
+        <header><h2>Archive expired products</h2><span class="badge muted">bulk</span></header>
         <p>Flips <code>status</code> to <code>Archived</code> where <code>available_until</code> has passed.</p>
         <footer>
             <button class="primary" disabled="@_busy" @onclick="ArchiveExpiredAsync">Run</button>
@@ -92,7 +91,7 @@
     </article>
 
     <article class="card">
-        <header><h2>Cancel pending orders</h2><ModeToggle @bind-Value="_cancelMode" /></header>
+        <header><h2>Cancel pending orders</h2><span class="badge muted">bulk</span></header>
         <p>Bulk status change — and something for the purge to delete.</p>
         <label><span>Product</span>
             <select @bind="_cancelProductId">
@@ -110,7 +109,7 @@
     </article>
 
     <article class="card">
-        <header><h2>Purge cancelled orders</h2><ModeToggle @bind-Value="_purgeMode" /></header>
+        <header><h2>Purge cancelled orders</h2><span class="badge muted">bulk</span></header>
         <p>Bulk delete. Each row is snapshotted whole, the jsonb delivery details included (recipient names and phones are PII).</p>
         <footer>
             <button class="primary danger" disabled="@_busy" @onclick="PurgeAsync">Delete</button>
@@ -119,8 +118,8 @@
     </article>
 
     <article class="card">
-        <header><h2>Upgrade a loyalty tier</h2><ModeToggle @bind-Value="_tierMode" /></header>
-        <p>Enum stored as text — run it once per mode and compare the rows: they are identical.</p>
+        <header><h2>Upgrade a loyalty tier</h2><span class="badge muted">bulk</span></header>
+        <p>Enum stored as text.</p>
         <div class="row2">
             <label><span>From</span>
                 <select @bind="_tierFrom">
@@ -149,7 +148,7 @@
     </article>
 
     <article class="card">
-        <header><h2>Write from outside the app</h2><SourceBadge Source="Trigger" /></header>
+        <header><h2>Write from outside the app</h2><span class="badge muted">no app context</span></header>
         <p>A fixed UPDATE over a separate connection with no interceptors — as psql would. No app context, so the
             row's “who” is the database role and the channel is <code>Database</code>.</p>
         <footer>
@@ -159,8 +158,8 @@
     </article>
 
     <article class="card">
-        <header><h2>Generate a day of activity</h2><span class="badge muted">all paths</span></header>
-        <p>Replays the seeder's mix: several personas, every capture path.</p>
+        <header><h2>Generate a day of activity</h2><span class="badge muted">everything</span></header>
+        <p>Replays the seeder's mix: several personas, every kind of write.</p>
         <footer>
             <button disabled="@_busy" @onclick="GenerateAsync">Run</button>
             <Outcome Result="@Result("activity")" />
@@ -184,14 +183,9 @@
     private string _contactName = "Morgan Ellis";
     private string _contactPhone = "+1 555 0199";
     private string? _language;
-    private string _pricesMode = "Trigger";
     private string _category = "Outdoor";
     private decimal _percent = 5;
-    private string _archiveMode = "Trigger";
-    private string _cancelMode = "Snapshot";
     private int _cancelProductId;
-    private string _purgeMode = "Snapshot";
-    private string _tierMode = "Trigger";
     private string _tierFrom = "Bronze";
     private string _tierTo = "Silver";
 
@@ -230,19 +224,19 @@
     });
 
     private Task AdjustPricesAsync() => RunAsync("prices", "Products.AdjustProductPrices", async () =>
-        Describe(await Api.AdjustPricesAsync(_category, _percent, _pricesMode)));
+        Describe(await Api.AdjustPricesAsync(_category, _percent)));
 
     private Task ArchiveExpiredAsync() => RunAsync("archive", "Products.ArchiveExpiredProducts", async () =>
-        Describe(await Api.ArchiveExpiredAsync(_archiveMode)));
+        Describe(await Api.ArchiveExpiredAsync()));
 
     private Task CancelPendingAsync() => RunAsync("cancel", "Orders.CancelPendingOrders", async () =>
-        Describe(await Api.CancelPendingOrdersAsync(_cancelProductId == 0 ? null : _cancelProductId, _cancelMode)));
+        Describe(await Api.CancelPendingOrdersAsync(_cancelProductId == 0 ? null : _cancelProductId)));
 
     private Task PurgeAsync() => RunAsync("purge", "Orders.PurgeCancelledOrders", async () =>
-        Describe(await Api.PurgeCancelledOrdersAsync(_purgeMode)));
+        Describe(await Api.PurgeCancelledOrdersAsync()));
 
     private Task UpgradeTierAsync() => RunAsync("tier", "Customers.UpgradeLoyaltyTier", async () =>
-        Describe(await Api.UpgradeLoyaltyTierAsync(_tierFrom, _tierTo, _tierMode)));
+        Describe(await Api.UpgradeLoyaltyTierAsync(_tierFrom, _tierTo)));
 
     private Task RecordViewsAsync() => RunAsync("views", null, async () =>
         $"{await Api.RecordViewsAsync()} row(s) updated — and no audit entries.");
@@ -253,11 +247,10 @@
     private Task GenerateAsync() => RunAsync("activity", null, async () =>
     {
         var steps = await Api.GenerateActivityAsync();
-        return string.Join(" · ", steps.Select(s => $"{s.Operation}: {s.RowsAffected} ({s.ExpectedSource})"));
+        return string.Join(" · ", steps.Select(s => $"{s.Operation}: {s.RowsAffected}"));
     });
 
-    private static string Describe(BulkResult result)
-        => $"{result.RowsAffected} row(s) affected via {result.Mode}.";
+    private static string Describe(int rows) => $"{rows} row(s) affected.";
 
     private async Task RunAsync(string card, string? operation, Func<Task<string>> action)
     {

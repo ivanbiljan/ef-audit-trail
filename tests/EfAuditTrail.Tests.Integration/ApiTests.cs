@@ -4,7 +4,6 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using EfAuditTrail.Api.Features.Audit;
 using EfAuditTrail.Api.Features.Products;
-using EfAuditTrail.Api.Features.Shared;
 using EfAuditTrail.Api.Infrastructure;
 using EfAuditTrail.Data;
 using EfAuditTrail.Data.Auditing;
@@ -19,7 +18,7 @@ using Microsoft.Extensions.DependencyInjection;
 namespace EfAuditTrail.Tests.Integration;
 
 /// <summary>End to end through Warp's HTTP endpoints: the middleware supplies the "who", the Warp pipeline
-/// behavior the "what", and the feed reads back what either approach wrote.</summary>
+/// behavior the "what", and the feed reads back what the trigger wrote.</summary>
 public sealed class ApiTests : IAsyncLifetime
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
@@ -60,16 +59,14 @@ public sealed class ApiTests : IAsyncLifetime
         await SharedPostgres.DropDatabaseAsync(_database);
     }
 
-    [Theory]
-    [InlineData(BulkAuditMode.Trigger, AuditSource.Trigger)]
-    [InlineData(BulkAuditMode.Snapshot, AuditSource.Snapshot)]
-    public async Task A_bulk_endpoint_is_audited_with_the_callers_identity_and_the_warp_operation(BulkAuditMode mode, AuditSource expected)
+    [Fact]
+    public async Task A_bulk_endpoint_is_audited_with_the_callers_identity_and_the_warp_operation()
     {
-        var response = await _client.PostAsJsonAsync("/api/products/adjust-prices", new AdjustProductPrices("Garden", 10, mode), Json);
+        var response = await _client.PostAsJsonAsync("/api/products/adjust-prices", new AdjustProductPrices("Garden", 10), Json);
         response.StatusCode.ShouldBe(HttpStatusCode.OK);
-        (await response.Content.ReadFromJsonAsync<BulkResult>(Json))!.RowsAffected.ShouldBe(2);
+        (await response.Content.ReadFromJsonAsync<int>(Json)).ShouldBe(2);
 
-        var page = await FeedAsync($"/api/audit?source={expected}");
+        var page = await FeedAsync("/api/audit");
 
         page.Items.Count.ShouldBe(2);
         page.Items.ShouldAllBe(x =>
@@ -125,14 +122,14 @@ public sealed class ApiTests : IAsyncLifetime
         first.Items.Select(x => x.Id).ShouldBeInOrder(SortDirection.Descending);
 
         var facets = await _client.GetFromJsonAsync<AuditFacets>("/api/audit/facets", Json);
-        facets!.Sources.Select(x => x.Value).ShouldBe(["Interceptor", "Trigger", "Snapshot"]);
-        facets.Sources.ShouldAllBe(x => x.Count > 0);
+        facets!.Total.ShouldBeGreaterThan(5);
+        facets.EntityTypes.ShouldNotBeEmpty();
     }
 
     [Fact]
     public async Task An_invalid_command_is_a_400_and_writes_nothing()
     {
-        var response = await _client.PostAsJsonAsync("/api/products/adjust-prices", new AdjustProductPrices("Garden", 0, BulkAuditMode.Trigger), Json);
+        var response = await _client.PostAsJsonAsync("/api/products/adjust-prices", new AdjustProductPrices("Garden", 0), Json);
 
         response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
         (await FeedAsync("/api/audit")).Items.ShouldBeEmpty();

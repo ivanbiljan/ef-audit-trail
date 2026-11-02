@@ -1,36 +1,52 @@
 using System.Data.Common;
 using System.Globalization;
+using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 
 namespace EfAuditTrail.Data.Auditing.Session;
 
+/// <summary>How a command gets the scope's context to the database before the trigger needs it.</summary>
+internal enum SessionDelivery
+{
+    /// <summary>The command cannot fire the trigger.</summary>
+    None,
+
+    /// <summary>A call inside each <c>UPDATE</c>/<c>DELETE</c>: no extra statement, no extra round trip.</summary>
+    InStatements,
+
+    /// <summary>A leading statement in the same command: no extra round trip.</summary>
+    LeadingStatement,
+
+    /// <summary>A separate command, one extra round trip.</summary>
+    SeparateCommand,
+}
+
 /// <summary>
-/// The bridge between <see cref="AuditContext"/> and the database trigger. Before every command that can
-/// write audited rows it publishes the scope's who/what (actor, channel, IP, UA, operation) as <c>audit.*</c>
-/// session settings, and tells the trigger whether the application is auditing that statement itself:
+/// The bridge between <see cref="AuditContext"/> and the database trigger, which records every update and
+/// delete. It publishes the scope's who/what (actor, channel, IP, UA, operation) as <c>audit.*</c> session
+/// settings before anything that can write audited rows:
 /// <list type="bullet">
-/// <item><c>SaveChanges</c> — the <see cref="AuditInterceptor"/> writes the rows, so the trigger stands down;</item>
-/// <item>inside <see cref="TriggerCapture.Suppress"/> — the snapshot bulk path writes the rows;</item>
-/// <item>anything else (<c>ExecuteUpdate</c>, <c>ExecuteDelete</c>, <c>ExecuteSql</c>) — the trigger records it.</item>
+/// <item><c>SaveChanges</c> — <c>audit.publish(…)</c> inside each statement's <c>WHERE</c>. EF reads rows
+/// affected by statement index, so a leading statement would hide stale rows from its concurrency check. The
+/// call has to be on every statement: a stale first row would otherwise leave the next one without context.</item>
+/// <item><c>ExecuteUpdate</c>, <c>ExecuteDelete</c> — a leading statement in the same command.</item>
+/// <item>anything else (<c>ExecuteSql</c>) — a separate command, because raw SQL may not be allowed in a
+/// multi-statement command at all (<c>VACUUM</c>).</item>
 /// </list>
-/// It also appends <c>FOR UPDATE</c> to queries tagged <see cref="AuditTags.ForUpdate"/>.
 /// </summary>
 /// <remarks>
 /// Settings are session-level (<c>set_config(..., false)</c>) rather than transaction-local, because
 /// <c>ExecuteUpdate</c> outside a transaction runs in autocommit and a local setting would be gone by the
-/// time the UPDATE runs. They are re-sent before every writing command, so a pooled connection, a rolled
-/// back transaction (which reverts settings) or a different scope can never leave stale context behind.
-/// <c>ExecuteUpdate</c> and <c>ExecuteDelete</c> carry them in the same command; anything else that writes
-/// costs one extra round trip. Reads (LINQ queries) are skipped.
+/// time the UPDATE runs. They are re-sent with every write, so a pooled connection, a rolled back
+/// transaction (which reverts settings) or a different scope can never leave stale context behind.
 /// </remarks>
 public sealed class AuditSessionInterceptor(AuditContext context) : DbCommandInterceptor
 {
-    // Prefixed: a combined command shares its parameters with EF's, which are named after captured variables.
+    // Prefixed: these parameters share a command with EF's, which are named after captured variables.
     private const string ParameterPrefix = "__audit_";
 
     internal const string SetSessionSql =
-        "select set_config('audit.suppress', @__audit_suppress, false), "
-        + "set_config('audit.operation', @__audit_operation, false), "
+        "select set_config('audit.operation', @__audit_operation, false), "
         + "set_config('audit.actor_kind', @__audit_actor_kind, false), "
         + "set_config('audit.actor_id', @__audit_actor_id, false), "
         + "set_config('audit.actor_display', @__audit_actor_display, false), "
@@ -39,13 +55,20 @@ public sealed class AuditSessionInterceptor(AuditContext context) : DbCommandInt
         + "set_config('audit.ip_address', @__audit_ip_address, false), "
         + "set_config('audit.user_agent', @__audit_user_agent, false)";
 
+    private const string PublishClause =
+        "WHERE audit.publish(@__audit_operation, @__audit_actor_kind, @__audit_actor_id, @__audit_actor_display, "
+        + "@__audit_on_behalf_of_customer_id, @__audit_channel, @__audit_ip_address, @__audit_user_agent) AND ";
+
+    private static readonly Regex WriteStatement = new("^(UPDATE|DELETE) ", RegexOptions.Multiline | RegexOptions.Compiled);
+
+    private static readonly Regex WhereClause = new("^WHERE ", RegexOptions.Multiline | RegexOptions.Compiled);
+
     public override InterceptionResult<DbDataReader> ReaderExecuting(
         DbCommand command,
         CommandEventData eventData,
         InterceptionResult<DbDataReader> result)
     {
-        ApplyForUpdate(command);
-        using var session = CreateSessionCommand(command, eventData);
+        using var session = PrepareSession(command, eventData);
         session?.ExecuteNonQuery();
 
         return result;
@@ -57,8 +80,7 @@ public sealed class AuditSessionInterceptor(AuditContext context) : DbCommandInt
         InterceptionResult<DbDataReader> result,
         CancellationToken cancellationToken = default)
     {
-        ApplyForUpdate(command);
-        await using var session = CreateSessionCommand(command, eventData);
+        await using var session = PrepareSession(command, eventData);
         if (session is not null)
         {
             await session.ExecuteNonQueryAsync(cancellationToken);
@@ -72,12 +94,7 @@ public sealed class AuditSessionInterceptor(AuditContext context) : DbCommandInt
         CommandEventData eventData,
         InterceptionResult<int> result)
     {
-        if (TryCombineSession(command, eventData))
-        {
-            return result;
-        }
-
-        using var session = CreateSessionCommand(command, eventData);
+        using var session = PrepareSession(command, eventData);
         session?.ExecuteNonQuery();
 
         return result;
@@ -89,12 +106,7 @@ public sealed class AuditSessionInterceptor(AuditContext context) : DbCommandInt
         InterceptionResult<int> result,
         CancellationToken cancellationToken = default)
     {
-        if (TryCombineSession(command, eventData))
-        {
-            return result;
-        }
-
-        await using var session = CreateSessionCommand(command, eventData);
+        await using var session = PrepareSession(command, eventData);
         if (session is not null)
         {
             await session.ExecuteNonQueryAsync(cancellationToken);
@@ -108,7 +120,7 @@ public sealed class AuditSessionInterceptor(AuditContext context) : DbCommandInt
         CommandEventData eventData,
         InterceptionResult<object> result)
     {
-        using var session = CreateSessionCommand(command, eventData);
+        using var session = PrepareSession(command, eventData);
         session?.ExecuteNonQuery();
 
         return result;
@@ -120,7 +132,7 @@ public sealed class AuditSessionInterceptor(AuditContext context) : DbCommandInt
         InterceptionResult<object> result,
         CancellationToken cancellationToken = default)
     {
-        await using var session = CreateSessionCommand(command, eventData);
+        await using var session = PrepareSession(command, eventData);
         if (session is not null)
         {
             await session.ExecuteNonQueryAsync(cancellationToken);
@@ -129,63 +141,85 @@ public sealed class AuditSessionInterceptor(AuditContext context) : DbCommandInt
         return result;
     }
 
-    /// <summary>Whether a command needs the session published, and whether the trigger should stand down for it.</summary>
-    internal static (bool Publish, bool Suppress) Classify(CommandSource source, bool suppressScope) => source switch
+    internal static SessionDelivery Classify(CommandSource source) => source switch
     {
         // Plain reads cannot fire an UPDATE/DELETE trigger; schema creation has nothing to audit.
-        CommandSource.LinqQuery or CommandSource.Migrations or CommandSource.ValueGenerator => (false, false),
-        CommandSource.SaveChanges => (true, true),
-        _ => (true, suppressScope),
+        CommandSource.LinqQuery or CommandSource.Migrations or CommandSource.ValueGenerator => SessionDelivery.None,
+        CommandSource.SaveChanges => SessionDelivery.InStatements,
+        CommandSource.ExecuteUpdate or CommandSource.ExecuteDelete => SessionDelivery.LeadingStatement,
+        _ => SessionDelivery.SeparateCommand,
     };
 
-    private static void ApplyForUpdate(DbCommand command)
-    {
-        // EF writes tags as leading "-- tag" comment lines. Row locks go last: SELECT … ORDER BY … LIMIT … FOR UPDATE.
-        if (command.CommandText.Contains("-- " + AuditTags.ForUpdate, StringComparison.Ordinal))
-        {
-            command.CommandText = command.CommandText.TrimEnd().TrimEnd(';') + Environment.NewLine + "FOR UPDATE";
-        }
-    }
-
     /// <summary>
-    /// Sends the session settings in the same round trip as the statement. Only for <c>ExecuteUpdate</c> and
-    /// <c>ExecuteDelete</c>: <c>SaveChanges</c> reads rows affected by statement index, so a leading statement
-    /// would hide stale rows from its concurrency check, and raw SQL may not be allowed in a multi-statement
-    /// command at all (<c>VACUUM</c>).
+    /// Adds <c>audit.publish(…)</c> to every <c>UPDATE</c>/<c>DELETE</c> of a <c>SaveChanges</c> command. Text
+    /// is safe to match here because EF sends values as parameters, so the only SQL in it is its own. Throws if
+    /// a statement does not have the expected shape: running it would record the change with no context.
     /// </summary>
-    private bool TryCombineSession(DbCommand command, CommandEventData eventData)
+    internal static string AddPublishClause(string sql)
     {
-        if (eventData.CommandSource is not (CommandSource.ExecuteUpdate or CommandSource.ExecuteDelete))
+        var writes = WriteStatement.Count(sql);
+        if (writes == 0)
         {
-            return false;
+            return sql;
         }
 
-        command.CommandText = SetSessionSql + ";" + Environment.NewLine + command.CommandText;
-        AddSessionParameters(command, Classify(eventData.CommandSource, TriggerCapture.IsSuppressed).Suppress);
-
-        return true;
-    }
-
-    private DbCommand? CreateSessionCommand(DbCommand command, CommandEventData eventData)
-    {
-        var (publish, suppress) = Classify(eventData.CommandSource, TriggerCapture.IsSuppressed);
-        if (!publish || command.Connection is null)
+        if (WhereClause.Count(sql) != writes)
         {
-            return null;
+            throw new InvalidOperationException(
+                $"Could not add audit.publish to {writes} UPDATE/DELETE statement(s), so they would be audited without context: {sql}");
         }
 
-        var session = command.Connection.CreateCommand();
-        session.Transaction = command.Transaction;
-        session.CommandText = SetSessionSql;
-
-        AddSessionParameters(session, suppress);
-
-        return session;
+        return WhereClause.Replace(sql, PublishClause);
     }
 
-    private void AddSessionParameters(DbCommand target, bool suppress)
+    /// <summary>Puts the context on the command itself where it can; otherwise returns the command to run first.</summary>
+    private DbCommand? PrepareSession(DbCommand command, CommandEventData eventData)
     {
-        Add(target, "suppress", suppress ? "on" : null);
+        switch (Classify(eventData.CommandSource))
+        {
+            case SessionDelivery.InStatements:
+                var sql = AddPublishClause(command.CommandText);
+                if (!ReferenceEquals(sql, command.CommandText))
+                {
+                    RequireChannel();
+                    command.CommandText = sql;
+                    AddSessionParameters(command);
+                }
+
+                return null;
+
+            case SessionDelivery.LeadingStatement:
+                RequireChannel();
+                command.CommandText = SetSessionSql + ";" + Environment.NewLine + command.CommandText;
+                AddSessionParameters(command);
+
+                return null;
+
+            case SessionDelivery.SeparateCommand when command.Connection is not null:
+                var session = command.Connection.CreateCommand();
+                session.Transaction = command.Transaction;
+                session.CommandText = SetSessionSql;
+                AddSessionParameters(session);
+
+                return session;
+
+            default:
+                return null;
+        }
+    }
+
+    // Before the statement runs, so a host that never wired the channel fails the write instead of having it
+    // recorded as an out-of-band change by the database role.
+    private void RequireChannel()
+    {
+        if (context.Channel is null)
+        {
+            throw new InvalidOperationException("AuditContext.Channel is not set — the host did not wire the audit channel");
+        }
+    }
+
+    private void AddSessionParameters(DbCommand target)
+    {
         Add(target, "operation", context.Operation);
         Add(target, "actor_kind", context.ActorKind.ToString());
         Add(target, "actor_id", context.ActorId?.ToString(CultureInfo.InvariantCulture));
@@ -203,47 +237,5 @@ public sealed class AuditSessionInterceptor(AuditContext context) : DbCommandInt
         parameter.ParameterName = ParameterPrefix + name;
         parameter.Value = value ?? string.Empty;
         command.Parameters.Add(parameter);
-    }
-}
-
-/// <summary>Tags the snapshot path puts on its queries.</summary>
-public static class AuditTags
-{
-    /// <summary>Makes <see cref="AuditSessionInterceptor"/> append <c>FOR UPDATE</c> to the tagged query.</summary>
-    public const string ForUpdate = "audit:for-update";
-}
-
-/// <summary>
-/// Marks the current async flow as "the application audits these statements itself", so the trigger stands
-/// down. An <see cref="AsyncLocal{T}"/> rather than a query tag: it does not depend on the provider carrying
-/// tags into <c>ExecuteUpdate</c> SQL, and it cannot leak to another request.
-/// </summary>
-public static class TriggerCapture
-{
-    private static readonly AsyncLocal<int> Depth = new();
-
-    public static bool IsSuppressed => Depth.Value > 0;
-
-    public static IDisposable Suppress()
-    {
-        Depth.Value++;
-
-        return new Scope();
-    }
-
-    private sealed class Scope : IDisposable
-    {
-        private bool _disposed;
-
-        public void Dispose()
-        {
-            if (_disposed)
-            {
-                return;
-            }
-
-            _disposed = true;
-            Depth.Value--;
-        }
     }
 }

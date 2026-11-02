@@ -7,8 +7,8 @@ using Microsoft.EntityFrameworkCore.Metadata.Conventions;
 namespace EfAuditTrail.Data.Auditing;
 
 /// <summary>
-/// Resolves the audit attributes once, at model build, into runtime annotations the interceptor reads per
-/// save. Runtime annotations only — a model annotation would be serialized into the migrations snapshot.
+/// Resolves the audit attributes once, at model build, into runtime annotations the trigger installer
+/// reads. Runtime annotations only — a model annotation would be serialized into the migrations snapshot.
 /// </summary>
 internal sealed class AuditConvention : IModelFinalizedConvention
 {

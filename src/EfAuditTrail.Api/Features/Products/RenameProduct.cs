@@ -6,7 +6,7 @@ using Warp.Http;
 
 namespace EfAuditTrail.Api.Features.Products;
 
-/// <summary>A tracked load-modify-save: the baseline the existing <c>AuditInterceptor</c> already covers.</summary>
+/// <summary>A tracked load-modify-save, audited like any other write.</summary>
 public sealed record RenameProduct(int Id, string Name) : IRequest<ProductSummary>;
 
 [WarpHttpPost("/api/products/rename")]

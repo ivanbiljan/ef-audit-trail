@@ -6,15 +6,10 @@ namespace EfAuditTrail.Data;
 
 public sealed class EfAuditTrailDbContext : DbContext
 {
-    public EfAuditTrailDbContext(DbContextOptions<EfAuditTrailDbContext> options, AuditContext audit)
+    public EfAuditTrailDbContext(DbContextOptions<EfAuditTrailDbContext> options)
         : base(options)
     {
-        Audit = audit;
     }
-
-    /// <summary>The scope's audit context. Exposed so the snapshot path can stamp rows built outside
-    /// <c>SaveChanges</c> with the same actor, channel and operation the interceptor would.</summary>
-    public AuditContext Audit { get; }
 
     public DbSet<Company> Companies => Set<Company>();
 

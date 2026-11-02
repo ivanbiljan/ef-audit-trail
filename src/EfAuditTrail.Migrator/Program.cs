@@ -49,7 +49,7 @@ try
     var steps = await host.Services.GetRequiredService<ActivityGenerator>().RunAsync();
     foreach (var step in steps)
     {
-        logger.LogInformation("[migrator] {Operation}: {Rows} row(s) written via {Source}", step.Operation, step.RowsAffected, step.ExpectedSource);
+        logger.LogInformation("[migrator] {Operation}: {Rows} row(s) written", step.Operation, step.RowsAffected);
     }
 
     logger.LogInformation("[migrator] schema provisioned, audit triggers installed, demo data seeded");

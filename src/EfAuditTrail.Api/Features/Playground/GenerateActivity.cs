@@ -4,7 +4,7 @@ using Warp.Http;
 
 namespace EfAuditTrail.Api.Features.Playground;
 
-/// <summary>Replays the migrator's burst of activity — every capture path, several personas.
+/// <summary>Replays the migrator's burst of activity — every kind of write, several personas.
 /// Each step runs as its own persona, so the caller's headers do not apply here.</summary>
 public sealed record GenerateActivity : IRequest<IReadOnlyList<ActivityStep>>;
 

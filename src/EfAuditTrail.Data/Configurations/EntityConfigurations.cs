@@ -32,7 +32,6 @@ internal sealed class AuditEntryConfiguration : IEntityTypeConfiguration<AuditEn
         builder.Property(x => x.UserAgent).HasColumnName("user_agent").HasMaxLength(512);
         builder.Property(x => x.Changes).HasColumnName("changes").HasColumnType("jsonb");
         builder.Property(x => x.PiiPaths).HasColumnName("pii_paths").HasColumnType("jsonb");
-        builder.Property(x => x.Source).HasColumnName("source").HasConversion<string>().HasMaxLength(16);
 
         // The feed is keyset-paged on id desc; the entity history and per-tenant views filter first.
         builder.HasIndex(x => new { x.EntityType, x.EntityKey, x.Id }).IsDescending(false, false, true);

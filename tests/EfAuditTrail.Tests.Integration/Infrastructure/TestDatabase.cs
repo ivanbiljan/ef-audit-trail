@@ -12,7 +12,7 @@ using Npgsql;
 namespace EfAuditTrail.Tests.Integration.Infrastructure;
 
 /// <summary>A fresh, seeded database with the trigger machinery installed and the real DI registration
-/// (both interceptors). Work runs in its own scope as a <see cref="Persona"/>, like a request would.</summary>
+/// (the session interceptor). Work runs in its own scope as a <see cref="Persona"/>, like a request would.</summary>
 public sealed class TestDatabase : IAsyncDisposable
 {
     private readonly ServiceProvider _services;

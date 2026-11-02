@@ -1,15 +1,17 @@
 using System.Text.Json;
-using EfAuditTrail.Data.Auditing.Snapshots;
+using EfAuditTrail.Data;
+using EfAuditTrail.Data.Auditing;
 using EfAuditTrail.Data.Auditing.Triggers;
 using EfAuditTrail.Data.Entities;
 using EfAuditTrail.Data.Seeding;
 using EfAuditTrail.Tests.Integration.Infrastructure;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using static EfAuditTrail.Tests.Integration.Infrastructure.TestDatabase;
 
 namespace EfAuditTrail.Tests.Integration;
 
-/// <summary>Approach 1: the database trigger records what the interceptor cannot see.</summary>
+/// <summary>The database trigger is the only thing that writes audit rows, whichever way a change arrives.</summary>
 public sealed class TriggerCaptureTests : IAsyncLifetime
 {
     private TestDatabase _db = null!;
@@ -32,7 +34,7 @@ public sealed class TriggerCaptureTests : IAsyncLifetime
 
         affected.ShouldBe(3);
         rows.Count.ShouldBe(3);
-        rows.ShouldAllBe(x => x.Source == AuditSource.Trigger && x.Action == AuditAction.Update && x.EntityType == "Product");
+        rows.ShouldAllBe(x => x.Action == AuditAction.Update && x.EntityType == "Product");
 
         var row = rows[0];
         row.Operation.ShouldBe("Products.AdjustPrices");
@@ -50,7 +52,7 @@ public sealed class TriggerCaptureTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task SaveChanges_is_recorded_by_the_interceptor_and_not_again_by_the_trigger()
+    public async Task SaveChanges_is_recorded_once_with_the_scope_context()
     {
         await _db.AsAsync(Persona.Operations, "Products.Rename", async db =>
         {
@@ -61,12 +63,15 @@ public sealed class TriggerCaptureTests : IAsyncLifetime
         });
 
         var row = (await _db.AuditAsync()).ShouldHaveSingleItem();
-        row.Source.ShouldBe(AuditSource.Interceptor);
+        row.Operation.ShouldBe("Products.Rename");
+        row.ActorDisplay.ShouldBe(Persona.Operations.Display);
+        row.Channel.ShouldBe(AuditChannel.BackOffice);
+        row.IpAddress.ShouldBe(Persona.Operations.IpAddress);
         Changes(row).Select(x => x.Key).ShouldBe(["Name"]);
     }
 
     [Fact]
-    public async Task Suppression_for_SaveChanges_does_not_leak_into_a_later_bulk_statement_in_the_same_transaction()
+    public async Task SaveChanges_and_a_bulk_statement_in_the_same_transaction_are_both_recorded()
     {
         await _db.AsAsync(Persona.Operations, "Mixed", async db =>
         {
@@ -85,8 +90,8 @@ public sealed class TriggerCaptureTests : IAsyncLifetime
         });
 
         var rows = await _db.AuditAsync();
-        rows.Count(x => x.Source == AuditSource.Interceptor).ShouldBe(1);
-        rows.Count(x => x.Source == AuditSource.Trigger).ShouldBe(2);
+        rows.Count.ShouldBe(3);
+        rows.ShouldAllBe(x => x.Operation == "Mixed");
     }
 
     [Fact]
@@ -117,7 +122,7 @@ public sealed class TriggerCaptureTests : IAsyncLifetime
         affected.ShouldBe(3);
         var rows = await _db.AuditAsync();
         rows.Count.ShouldBe(3);
-        rows.ShouldAllBe(x => x.Source == AuditSource.Trigger && x.Operation == "Products.Restock");
+        rows.ShouldAllBe(x => x.Operation == "Products.Restock");
     }
 
     [Fact]
@@ -136,19 +141,64 @@ public sealed class TriggerCaptureTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Suppression_for_the_snapshot_path_does_not_leak_into_a_later_bulk_statement_in_the_same_transaction()
+    public async Task SaveChanges_with_a_stale_row_in_a_batch_fails_and_keeps_context_for_the_rows_that_committed()
     {
-        await _db.AsAsync(Persona.Operations, "Mixed", async db =>
+        await Should.ThrowAsync<DbUpdateConcurrencyException>(() => _db.AsAsync(Persona.Operations, "Products.Rename", async db =>
         {
-            await using var transaction = await db.Database.BeginTransactionAsync();
-            await db.Products.Where(x => x.Sku == "OUT-02").ExecuteAuditedUpdateAsync(db, s => s.SetProperty(x => x.Stock, 1));
-            await db.Products.Where(x => x.Sku == "OUT-02").ExecuteUpdateAsync(s => s.SetProperty(x => x.Stock, 2));
-            await transaction.CommitAsync();
+            db.Database.AutoTransactionBehavior = AutoTransactionBehavior.Never;
+            var products = await db.Products.Where(x => x.Category == "Outdoor").OrderBy(x => x.Id).Take(2).ToListAsync();
+            await _db.ExecuteOutOfBandAsync($"delete from products where id = {products[0].Id}");
+            await _db.ExecuteOutOfBandAsync("delete from audit.entries");
+            products[0].Name = "Gone";
+            products[1].Name = "Still here";
 
-            return 0;
+            return await db.SaveChangesAsync();
+        }));
+
+        var row = (await _db.AuditAsync()).ShouldHaveSingleItem();
+        row.Operation.ShouldBe("Products.Rename");
+        row.ActorDisplay.ShouldBe(Persona.Operations.Display);
+    }
+
+    [Fact]
+    public async Task Without_a_channel_a_save_or_bulk_write_fails_rather_than_passing_as_out_of_band()
+    {
+        await using var scope = _db.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<EfAuditTrailDbContext>();
+        var product = await db.Products.SingleAsync(x => x.Sku == "OUT-02");
+        product.Name = "No channel";
+
+        // SaveChanges wraps what is thrown while it executes.
+        (await Should.ThrowAsync<DbUpdateException>(() => db.SaveChangesAsync())).InnerException.ShouldBeOfType<InvalidOperationException>();
+        await Should.ThrowAsync<InvalidOperationException>(() =>
+            db.Products.Where(x => x.Sku == "OUT-02").ExecuteUpdateAsync(s => s.SetProperty(x => x.Stock, 1)));
+
+        (await _db.AuditAsync()).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Without_an_operation_the_row_is_unattributed()
+    {
+        await using var scope = _db.Services.CreateAsyncScope();
+        Persona.Operations.ApplyTo(scope.ServiceProvider.GetRequiredService<AuditContext>());
+        var db = scope.ServiceProvider.GetRequiredService<EfAuditTrailDbContext>();
+        (await db.Products.SingleAsync(x => x.Sku == "OUT-02")).Name = "No operation";
+        await db.SaveChangesAsync();
+
+        (await _db.AuditAsync()).ShouldHaveSingleItem().Operation.ShouldBe("unattributed");
+    }
+
+    [Fact]
+    public async Task Inserts_are_not_audited()
+    {
+        await _db.AsAsync(Persona.Operations, "Companies.Add", async db =>
+        {
+            db.Companies.Add(new Company { Name = "New Co" });
+
+            return await db.SaveChangesAsync();
         });
 
-        (await _db.AuditAsync()).Select(x => x.Source).ShouldBe([AuditSource.Snapshot, AuditSource.Trigger]);
+        (await _db.AuditAsync()).ShouldBeEmpty();
     }
 
     [Fact]
@@ -210,7 +260,6 @@ public sealed class TriggerCaptureTests : IAsyncLifetime
         await _db.ExecuteOutOfBandAsync("update products set name = name || ' (dba)' where sku = 'OFF-02'");
 
         var row = (await _db.AuditAsync()).ShouldHaveSingleItem();
-        row.Source.ShouldBe(AuditSource.Trigger);
         row.Channel.ShouldBe(AuditChannel.Database);
         row.ActorKind.ShouldBe(AuditActorKind.System);
         row.ActorDisplay.ShouldBe("postgres");
@@ -260,7 +309,7 @@ public sealed class TriggerCaptureTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task An_fk_cascade_is_recorded_even_when_the_parent_delete_was_audited_by_the_app()
+    public async Task An_fk_cascade_is_recorded_along_with_the_parent_delete()
     {
         var orders = await _db.ReadAsync(db => db.Orders.CountAsync(x => db.Products.Any(e => e.Id == x.ProductId && e.Sku == "GAR-01")));
 
@@ -275,10 +324,10 @@ public sealed class TriggerCaptureTests : IAsyncLifetime
         var rows = await _db.AuditAsync();
 
         orders.ShouldBeGreaterThan(0);
-        rows.Single(x => x.EntityType == "Product").Source.ShouldBe(AuditSource.Interceptor);
+        rows.Single(x => x.EntityType == "Product").Action.ShouldBe(AuditAction.Delete);
         var cascaded = rows.Where(x => x.EntityType == "Order").ToList();
         cascaded.Count.ShouldBe(orders);
-        cascaded.ShouldAllBe(x => x.Source == AuditSource.Trigger && x.Action == AuditAction.Delete && x.Operation == "Products.Delete");
+        cascaded.ShouldAllBe(x => x.Action == AuditAction.Delete && x.Operation == "Products.Delete");
     }
 
     [Fact]

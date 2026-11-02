@@ -1,6 +1,5 @@
 using System.Text.Json.Nodes;
 using EfAuditTrail.Data.Auditing;
-using EfAuditTrail.Data.Auditing.Snapshots;
 using EfAuditTrail.Data.Entities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -39,13 +38,12 @@ public sealed record Persona(
     }
 }
 
-public sealed record ActivityStep(string Operation, AuditSource ExpectedSource, int RowsAffected);
+public sealed record ActivityStep(string Operation, int RowsAffected);
 
 /// <summary>
-/// Replays a believable slice of a day through every capture path, each step as a different person in its
-/// own scope, so the audit feed has something to compare:
-/// SaveChanges (interceptor), plain ExecuteUpdate/ExecuteDelete (trigger), ExecuteAuditedUpdate/Delete
-/// (snapshot) and raw SQL from outside the application (trigger, no app context).
+/// Replays a believable slice of a day through every kind of write, each step as a different person in its
+/// own scope, so the audit feed has something to show: SaveChanges, ExecuteUpdate/ExecuteDelete and raw SQL
+/// from outside the application (no app context).
 /// </summary>
 public sealed class ActivityGenerator(IServiceScopeFactory scopes, DemoDatabase database)
 {
@@ -54,8 +52,8 @@ public sealed class ActivityGenerator(IServiceScopeFactory scopes, DemoDatabase 
         var steps = new List<ActivityStep>();
         var random = Random.Shared;
 
-        // 1. Ops renames a product and reworks one of its specs — SaveChanges → interceptor.
-        steps.Add(await AsAsync(Persona.Operations, "Products.ReworkAttributes", AuditSource.Interceptor, async db =>
+        // 1. Ops renames a product and reworks one of its specs — SaveChanges.
+        steps.Add(await AsAsync(Persona.Operations, "Products.ReworkAttributes", async db =>
         {
             var product = await db.Products.OrderBy(x => x.Id).Skip(random.Next(0, 9)).FirstAsync(cancellationToken);
             var attributes = JsonNode.Parse(product.Attributes)!.AsObject();
@@ -69,7 +67,7 @@ public sealed class ActivityGenerator(IServiceScopeFactory scopes, DemoDatabase 
         }, cancellationToken));
 
         // 2. A customer updates their delivery contact and language in the app — SaveChanges, jsonb, PII.
-        steps.Add(await AsAsync(Persona.Shopper, "Customers.UpdateProfile", AuditSource.Interceptor, async db =>
+        steps.Add(await AsAsync(Persona.Shopper, "Customers.UpdateProfile", async db =>
         {
             var customer = await db.Customers.OrderBy(x => x.Id).FirstAsync(cancellationToken);
             var profile = JsonNode.Parse(customer.Profile)!.AsObject();
@@ -83,7 +81,7 @@ public sealed class ActivityGenerator(IServiceScopeFactory scopes, DemoDatabase 
 
         // 3. Support changes an email on a customer's behalf — SaveChanges, PII, on-behalf-of.
         var supportTarget = await WithDbAsync(db => db.Customers.OrderBy(x => x.Id).Skip(1).Select(x => x.Id).FirstAsync(cancellationToken), cancellationToken);
-        steps.Add(await AsAsync(Persona.SupportOnBehalfOf(supportTarget), "Customers.ChangeEmail", AuditSource.Interceptor, async db =>
+        steps.Add(await AsAsync(Persona.SupportOnBehalfOf(supportTarget), "Customers.ChangeEmail", async db =>
         {
             var customer = await db.Customers.SingleAsync(x => x.Id == supportTarget, cancellationToken);
             customer.Email = $"{customer.FullName.Split(' ')[0].ToLowerInvariant()}.{random.Next(1000, 9999)}@example.org";
@@ -92,7 +90,7 @@ public sealed class ActivityGenerator(IServiceScopeFactory scopes, DemoDatabase 
         }, cancellationToken));
 
         // 4. Ops takes three new orders and cancels two of them — inserts are not audited, the cancellations are.
-        steps.Add(await AsAsync(Persona.Operations, "Orders.Cancel", AuditSource.Interceptor, async db =>
+        steps.Add(await AsAsync(Persona.Operations, "Orders.Cancel", async db =>
         {
             var product = await db.Products.Where(x => x.Status == ProductStatus.Active).OrderBy(x => x.Id).FirstAsync(cancellationToken);
             var customers = await db.Customers.OrderBy(x => x.Id).Take(3).ToListAsync(cancellationToken);
@@ -117,14 +115,14 @@ public sealed class ActivityGenerator(IServiceScopeFactory scopes, DemoDatabase 
             return await db.SaveChangesAsync(cancellationToken);
         }, cancellationToken));
 
-        // 5. Pricing raises one category with a plain ExecuteUpdate — invisible to the interceptor, caught by the trigger.
-        var triggerCategory = Pick(random, DemoSeeder.Categories);
-        steps.Add(await AsAsync(Persona.Pricing, "Products.AdjustPrices", AuditSource.Trigger, db =>
+        // 5. Pricing raises one category with ExecuteUpdate.
+        var raisedCategory = Pick(random, DemoSeeder.Categories);
+        steps.Add(await AsAsync(Persona.Pricing, "Products.AdjustPrices", db =>
         {
             var now = DateTime.UtcNow;
 
             return db.Products
-                .Where(x => x.Category == triggerCategory && x.Status != ProductStatus.Archived)
+                .Where(x => x.Category == raisedCategory && x.Status != ProductStatus.Archived)
                 .ExecuteUpdateAsync(s =>
                 {
                     s.SetProperty(x => x.Price, x => Math.Round(x.Price * 1.04m, 2));
@@ -132,23 +130,23 @@ public sealed class ActivityGenerator(IServiceScopeFactory scopes, DemoDatabase 
                 }, cancellationToken);
         }, cancellationToken));
 
-        // 6. …and another category through the snapshot path — same rows, written by the application.
-        var snapshotCategory = DemoSeeder.Categories.First(x => x != triggerCategory);
-        steps.Add(await AsAsync(Persona.Pricing, "Products.AdjustPrices", AuditSource.Snapshot, db =>
+        // 6. …and lowers another.
+        var loweredCategory = DemoSeeder.Categories.First(x => x != raisedCategory);
+        steps.Add(await AsAsync(Persona.Pricing, "Products.AdjustPrices", db =>
         {
             var now = DateTime.UtcNow;
 
             return db.Products
-                .Where(x => x.Category == snapshotCategory && x.Status != ProductStatus.Archived)
-                .ExecuteAuditedUpdateAsync(db, s =>
+                .Where(x => x.Category == loweredCategory && x.Status != ProductStatus.Archived)
+                .ExecuteUpdateAsync(s =>
                 {
                     s.SetProperty(x => x.Price, x => Math.Round(x.Price * 0.97m, 2));
                     s.SetProperty(x => x.UpdatedAt, now);
                 }, cancellationToken);
         }, cancellationToken));
 
-        // 7. The nightly job archives expired products (trigger) and purges cancelled orders (snapshot delete).
-        steps.Add(await AsAsync(Persona.NightlyJob, "Maintenance.ArchiveExpired", AuditSource.Trigger, db =>
+        // 7. The nightly job archives expired products and purges cancelled orders.
+        steps.Add(await AsAsync(Persona.NightlyJob, "Maintenance.ArchiveExpired", db =>
         {
             var today = DateOnly.FromDateTime(DateTime.UtcNow);
 
@@ -157,17 +155,17 @@ public sealed class ActivityGenerator(IServiceScopeFactory scopes, DemoDatabase 
                 .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, ProductStatus.Archived), cancellationToken);
         }, cancellationToken));
 
-        steps.Add(await AsAsync(Persona.NightlyJob, "Maintenance.PurgeCancelledOrders", AuditSource.Snapshot, db =>
-            db.Orders.Where(x => x.Status == OrderStatus.Cancelled).ExecuteAuditedDeleteAsync(db, cancellationToken), cancellationToken));
+        steps.Add(await AsAsync(Persona.NightlyJob, "Maintenance.PurgeCancelledOrders", db =>
+            db.Orders.Where(x => x.Status == OrderStatus.Cancelled).ExecuteDeleteAsync(cancellationToken), cancellationToken));
 
-        // 8. Loyalty upgrade with a plain ExecuteUpdate — trigger, enum column.
-        steps.Add(await AsAsync(Persona.Pricing, "Customers.UpgradeLoyalty", AuditSource.Trigger, db =>
+        // 8. Loyalty upgrade with ExecuteUpdate — enum column.
+        steps.Add(await AsAsync(Persona.Pricing, "Customers.UpgradeLoyalty", db =>
             db.Customers
                 .Where(x => x.LoyaltyTier == LoyaltyTier.Silver)
                 .ExecuteUpdateAsync(s => s.SetProperty(x => x.LoyaltyTier, LoyaltyTier.Gold), cancellationToken), cancellationToken));
 
-        // 9. A DBA flips a newsletter flag straight from psql — no application, no context: only the trigger sees it.
-        steps.Add(new ActivityStep("(out of band)", AuditSource.Trigger, await OutOfBandSql.ToggleNewsletterAsync(database, cancellationToken)));
+        // 9. A DBA flips a newsletter flag straight from psql — no application, no context.
+        steps.Add(new ActivityStep("(out of band)", await OutOfBandSql.ToggleNewsletterAsync(database, cancellationToken)));
 
         return steps;
     }
@@ -175,7 +173,6 @@ public sealed class ActivityGenerator(IServiceScopeFactory scopes, DemoDatabase 
     private async Task<ActivityStep> AsAsync(
         Persona persona,
         string operation,
-        AuditSource expected,
         Func<EfAuditTrailDbContext, Task<int>> work,
         CancellationToken cancellationToken)
     {
@@ -188,7 +185,7 @@ public sealed class ActivityGenerator(IServiceScopeFactory scopes, DemoDatabase 
             var db = scope.ServiceProvider.GetRequiredService<EfAuditTrailDbContext>();
             cancellationToken.ThrowIfCancellationRequested();
 
-            return new ActivityStep(operation, expected, await work(db));
+            return new ActivityStep(operation, await work(db));
         }
     }
 

@@ -9,6 +9,9 @@ public sealed class AuditConventionTests
 {
     private static readonly IModel Model = TestModel.InMemory().Model;
 
+    private static string[]? Pii(string property)
+        => Property<Customer>(property).FindRuntimeAnnotation(AuditAnnotations.PersonalData)?.Value as string[];
+
     [Fact]
     public void Business_entities_are_audited_and_the_audit_table_is_not()
     {
@@ -44,26 +47,13 @@ public sealed class AuditConventionTests
     [Fact]
     public void A_bare_AuditPii_marks_the_whole_value()
     {
-        AuditAnnotations.IsPersonalData(Property<Customer>(nameof(Customer.Email)), string.Empty, container: false).ShouldBeTrue();
-        AuditAnnotations.IsPersonalData(Property<Customer>(nameof(Customer.LoyaltyTier)), string.Empty, container: false).ShouldBeFalse();
+        Pii(nameof(Customer.Email)).ShouldBeEmpty();
+        Pii(nameof(Customer.LoyaltyTier)).ShouldBeNull();
     }
 
-    [Theory]
-    [InlineData("/deliveryContact/phone", false, true)]
-    [InlineData("/deliveryContact", false, true)]
-    [InlineData("/identity/number", false, true)]
-    [InlineData("/language", false, false)]
-    [InlineData("/interests/0", false, false)]
-    [InlineData("/language", true, true)]
-    public void Profile_patterns_narrow_personal_data_to_their_paths(string path, bool container, bool expected)
-        => AuditAnnotations.IsPersonalData(Property<Customer>(nameof(Customer.Profile)), path, container).ShouldBe(expected);
-
-    [Theory]
-    [InlineData("/parcels/0/recipient", true)]
-    [InlineData("/parcels/3/phone", true)]
-    [InlineData("/parcels/0/size", false)]
-    public void Single_segment_wildcards_match_array_indexes(string path, bool expected)
-        => AuditAnnotations.IsPersonalData(Property<Order>(nameof(Order.Delivery)), path, container: false).ShouldBe(expected);
+    [Fact]
+    public void AuditPii_paths_are_carried_as_patterns()
+        => Pii(nameof(Customer.Profile)).ShouldBe(["/deliveryContact/**", "/identity/**"], ignoreOrder: true);
 
     [Fact]
     public void Pii_paths_on_a_non_json_property_fail_the_model_build()

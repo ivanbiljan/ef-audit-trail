@@ -1,11 +1,9 @@
 -- =====================================================================================
--- Trigger-based audit capture. Writes the SAME rows into audit.entries that the EF
--- AuditInterceptor writes, so readers never care which path produced a row.
+-- Trigger-based audit capture: the one place audit.entries is written from.
 --
---   * Fills the gaps the interceptor cannot see: ExecuteUpdate/ExecuteDelete, raw SQL,
---     psql, other services, FK cascades.
---   * Stands down for statements the application audits itself: the AuditSessionInterceptor
---     sets audit.suppress = 'on' for SaveChanges and for the snapshot bulk path.
+--   * Catches everything that reaches a table: SaveChanges, ExecuteUpdate/ExecuteDelete, raw
+--     SQL, psql, other services, FK cascades.
+--   * Who and what come from audit.* session settings published by AuditSessionInterceptor.
 --   * Column list, property names, PII patterns and JSON columns are NOT configured here —
 --     AuditTriggerInstaller derives them from the EF model ([AuditIgnore], [AuditPii], jsonb)
 --     and calls audit.enable() per table, so the attributes stay the single source of truth.
@@ -36,9 +34,38 @@ create or replace function audit.ctx(p_name text) returns text
 language sql stable
 as $$ select nullif(current_setting('audit.' || p_name, true), '') $$;
 
+-- Publishes the session context from inside a statement's WHERE clause, so a SaveChanges command
+-- keeps its statement count: EF reads rows affected by statement index. High cost: the planner
+-- checks the key first, so this only runs for rows the statement will actually write, and it
+-- always runs before their trigger.
+create or replace function audit.publish(
+    p_operation     text,
+    p_actor_kind    text,
+    p_actor_id      text,
+    p_actor_display text,
+    p_on_behalf_of  text,
+    p_channel       text,
+    p_ip_address    text,
+    p_user_agent    text) returns boolean
+language plpgsql volatile cost 1000
+as $$
+begin
+    perform set_config('audit.operation', p_operation, false),
+            set_config('audit.actor_kind', p_actor_kind, false),
+            set_config('audit.actor_id', p_actor_id, false),
+            set_config('audit.actor_display', p_actor_display, false),
+            set_config('audit.on_behalf_of_customer_id', p_on_behalf_of, false),
+            set_config('audit.channel', p_channel, false),
+            set_config('audit.ip_address', p_ip_address, false),
+            set_config('audit.user_agent', p_user_agent, false);
+
+    return true;
+end
+$$;
+
 -- -------------------------------------------------------------------------------------
--- Value formatting: match what System.Text.Json writes for the same CLR value, so a
--- trigger row and an interceptor row for the same change are byte-comparable.
+-- Value formatting: match what System.Text.Json writes for the same CLR value, so readers
+-- of changes see the same text the application would have serialized.
 -- -------------------------------------------------------------------------------------
 
 -- DateTime: 2026-11-01T10:00:00Z, 2026-11-01T10:00:00.5Z (fraction trimmed, as "O" without padding).
@@ -67,7 +94,7 @@ language sql immutable
 as $$ select coalesce(jsonb_typeof(p_value) in ('object', 'array'), false) $$;
 
 -- -------------------------------------------------------------------------------------
--- Structural JSON diff — a port of JsonDelta.Compute: RFC 6901 paths to changed leaves.
+-- Structural JSON diff: RFC 6901 paths to changed leaves.
 -- JSON null and a missing key are the same thing; a container against a scalar is a
 -- type change and is reported whole.
 -- -------------------------------------------------------------------------------------
@@ -120,7 +147,7 @@ end
 $$;
 
 -- -------------------------------------------------------------------------------------
--- PII — a port of AuditAnnotations.IsPersonalData. Patterns and paths are split on '/'
+-- PII. Patterns and paths are split on '/'
 -- exactly like string.Split('/'); '*' matches one segment, '**' any number.
 -- -------------------------------------------------------------------------------------
 create or replace function audit.path_matches(p_pattern text[], p_path text[]) returns boolean
@@ -221,7 +248,7 @@ begin
     insert into audit.entries (
         occurred_at, company_id, operation, action, entity_type, entity_key,
         actor_kind, actor_id, actor_display, on_behalf_of_customer_id, channel,
-        ip_address, user_agent, changes, pii_paths, source)
+        ip_address, user_agent, changes, pii_paths)
     values (
         now(),
         case when v_cfg.company_column is not null then (p_old_row ->> v_cfg.company_column)::integer end,
@@ -241,33 +268,26 @@ begin
         audit.ctx('ip_address'),
         left(audit.ctx('user_agent'), 512),
         v_changes,
-        v_pii_paths,
-        'Trigger');
+        v_pii_paths);
 end
 $$;
 
 -- -------------------------------------------------------------------------------------
 -- The capture trigger. One generic function for every audited table.
 --
--- BEFORE, not AFTER, and named zz_ so it runs last among BEFORE triggers (they fire in name
--- order) and sees the final NEW. BEFORE because it is the only place an FK cascade is
--- distinguishable: cascaded rows fire BEFORE triggers at depth 2, but their AFTER triggers
--- are drained at depth 1 alongside the parent statement's. If the statement later fails, the
--- transaction rolls the audit row back with it.
+-- BEFORE, and named zz_ so it runs last among BEFORE triggers (they fire in name order) and
+-- sees the final NEW. If the statement later fails, the transaction rolls the audit row back
+-- with it.
 -- -------------------------------------------------------------------------------------
 create or replace function audit.capture() returns trigger
 language plpgsql
 as $$
 begin
-    -- The application audits this statement itself (SaveChanges, snapshot bulk path). Depth 1 only:
-    -- rows an FK cascade touches were never in the application's change set, so they are still recorded.
-    if not (audit.ctx('suppress') is not distinct from 'on' and pg_trigger_depth() = 1) then
-        perform audit.record(
-            tg_relid::regclass,
-            tg_op,
-            to_jsonb(old),
-            case when tg_op = 'DELETE' then null else to_jsonb(new) end);
-    end if;
+    perform audit.record(
+        tg_relid::regclass,
+        tg_op,
+        to_jsonb(old),
+        case when tg_op = 'DELETE' then null else to_jsonb(new) end);
 
     if tg_op = 'DELETE' then
         return old;
@@ -322,7 +342,7 @@ begin
         company_column = excluded.company_column,
         columns        = excluded.columns;
 
-    -- Updates and deletes only, like the interceptor: an insert has no "before" worth recording.
+    -- Updates and deletes only: an insert has no "before" worth recording.
     execute format(
         'create or replace trigger zz_audit_capture before update or delete on %s '
         'for each row execute function audit.capture()', p_relation);
