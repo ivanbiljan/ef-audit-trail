@@ -1,4 +1,5 @@
 using System.Text.Json;
+using EfAuditTrail.Data.Auditing.Snapshots;
 using EfAuditTrail.Data.Auditing.Triggers;
 using EfAuditTrail.Data.Entities;
 using EfAuditTrail.Data.Seeding;
@@ -86,6 +87,68 @@ public sealed class TriggerCaptureTests : IAsyncLifetime
         var rows = await _db.AuditAsync();
         rows.Count(x => x.Source == AuditSource.Interceptor).ShouldBe(1);
         rows.Count(x => x.Source == AuditSource.Trigger).ShouldBe(2);
+    }
+
+    [Fact]
+    public async Task SaveChanges_against_a_deleted_row_fails_its_concurrency_check_and_writes_no_audit()
+    {
+        await Should.ThrowAsync<DbUpdateConcurrencyException>(() => _db.AsAsync(Persona.Operations, "Products.Rename", async db =>
+        {
+            var product = await db.Products.SingleAsync(x => x.Sku == "OUT-02");
+            await _db.ExecuteOutOfBandAsync("delete from products where sku = 'OUT-02'");
+            await _db.ExecuteOutOfBandAsync("delete from audit.entries");
+            product.Name = "Gone";
+
+            return await db.SaveChangesAsync();
+        }));
+
+        (await _db.AuditAsync()).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task A_bulk_statement_can_capture_variables_named_like_the_session_settings()
+    {
+        var suppress = 7;
+        var operation = "Outdoor";
+
+        var affected = await _db.AsAsync(Persona.Pricing, "Products.Restock", db =>
+            db.Products.Where(x => x.Category == operation).ExecuteUpdateAsync(s => s.SetProperty(x => x.Stock, suppress)));
+
+        affected.ShouldBe(3);
+        var rows = await _db.AuditAsync();
+        rows.Count.ShouldBe(3);
+        rows.ShouldAllBe(x => x.Source == AuditSource.Trigger && x.Operation == "Products.Restock");
+    }
+
+    [Fact]
+    public async Task A_bulk_statement_that_matches_nothing_reports_zero_rows()
+    {
+        var affected = await _db.AsAsync(Persona.Pricing, "Products.Restock", db =>
+            db.Products.Where(x => x.Category == "Atlantis").ExecuteUpdateAsync(s => s.SetProperty(x => x.Stock, 1)));
+
+        affected.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task Raw_sql_that_cannot_run_in_a_transaction_still_works()
+    {
+        await _db.AsAsync(Persona.Operations, "Maintenance", db => db.Database.ExecuteSqlRawAsync("vacuum products"));
+    }
+
+    [Fact]
+    public async Task Suppression_for_the_snapshot_path_does_not_leak_into_a_later_bulk_statement_in_the_same_transaction()
+    {
+        await _db.AsAsync(Persona.Operations, "Mixed", async db =>
+        {
+            await using var transaction = await db.Database.BeginTransactionAsync();
+            await db.Products.Where(x => x.Sku == "OUT-02").ExecuteAuditedUpdateAsync(db, s => s.SetProperty(x => x.Stock, 1));
+            await db.Products.Where(x => x.Sku == "OUT-02").ExecuteUpdateAsync(s => s.SetProperty(x => x.Stock, 2));
+            await transaction.CommitAsync();
+
+            return 0;
+        });
+
+        (await _db.AuditAsync()).Select(x => x.Source).ShouldBe([AuditSource.Snapshot, AuditSource.Trigger]);
     }
 
     [Fact]

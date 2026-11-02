@@ -118,7 +118,7 @@ public sealed class SnapshotAuditTests : IAsyncLifetime
 
         var commands = _log.Commands;
         var select = commands.FindIndex(x => x.Contains("FOR UPDATE", StringComparison.Ordinal));
-        var update = commands.FindIndex(x => x.TrimStart().StartsWith("UPDATE", StringComparison.OrdinalIgnoreCase));
+        var update = commands.FindIndex(x => x.Contains("UPDATE ", StringComparison.Ordinal) && !x.Contains("FOR UPDATE", StringComparison.Ordinal));
 
         select.ShouldBeGreaterThanOrEqualTo(0);
         update.ShouldBeGreaterThan(select);

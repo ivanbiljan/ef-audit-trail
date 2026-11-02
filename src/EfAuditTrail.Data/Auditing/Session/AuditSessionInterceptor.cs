@@ -20,20 +20,24 @@ namespace EfAuditTrail.Data.Auditing.Session;
 /// <c>ExecuteUpdate</c> outside a transaction runs in autocommit and a local setting would be gone by the
 /// time the UPDATE runs. They are re-sent before every writing command, so a pooled connection, a rolled
 /// back transaction (which reverts settings) or a different scope can never leave stale context behind.
-/// That costs one extra round trip per write; reads (LINQ queries) are skipped.
+/// <c>ExecuteUpdate</c> and <c>ExecuteDelete</c> carry them in the same command; anything else that writes
+/// costs one extra round trip. Reads (LINQ queries) are skipped.
 /// </remarks>
 public sealed class AuditSessionInterceptor(AuditContext context) : DbCommandInterceptor
 {
+    // Prefixed: a combined command shares its parameters with EF's, which are named after captured variables.
+    private const string ParameterPrefix = "__audit_";
+
     internal const string SetSessionSql =
-        "select set_config('audit.suppress', @suppress, false), "
-        + "set_config('audit.operation', @operation, false), "
-        + "set_config('audit.actor_kind', @actor_kind, false), "
-        + "set_config('audit.actor_id', @actor_id, false), "
-        + "set_config('audit.actor_display', @actor_display, false), "
-        + "set_config('audit.on_behalf_of_customer_id', @on_behalf_of_customer_id, false), "
-        + "set_config('audit.channel', @channel, false), "
-        + "set_config('audit.ip_address', @ip_address, false), "
-        + "set_config('audit.user_agent', @user_agent, false)";
+        "select set_config('audit.suppress', @__audit_suppress, false), "
+        + "set_config('audit.operation', @__audit_operation, false), "
+        + "set_config('audit.actor_kind', @__audit_actor_kind, false), "
+        + "set_config('audit.actor_id', @__audit_actor_id, false), "
+        + "set_config('audit.actor_display', @__audit_actor_display, false), "
+        + "set_config('audit.on_behalf_of_customer_id', @__audit_on_behalf_of_customer_id, false), "
+        + "set_config('audit.channel', @__audit_channel, false), "
+        + "set_config('audit.ip_address', @__audit_ip_address, false), "
+        + "set_config('audit.user_agent', @__audit_user_agent, false)";
 
     public override InterceptionResult<DbDataReader> ReaderExecuting(
         DbCommand command,
@@ -68,6 +72,11 @@ public sealed class AuditSessionInterceptor(AuditContext context) : DbCommandInt
         CommandEventData eventData,
         InterceptionResult<int> result)
     {
+        if (TryCombineSession(command, eventData))
+        {
+            return result;
+        }
+
         using var session = CreateSessionCommand(command, eventData);
         session?.ExecuteNonQuery();
 
@@ -80,6 +89,11 @@ public sealed class AuditSessionInterceptor(AuditContext context) : DbCommandInt
         InterceptionResult<int> result,
         CancellationToken cancellationToken = default)
     {
+        if (TryCombineSession(command, eventData))
+        {
+            return result;
+        }
+
         await using var session = CreateSessionCommand(command, eventData);
         if (session is not null)
         {
@@ -133,6 +147,25 @@ public sealed class AuditSessionInterceptor(AuditContext context) : DbCommandInt
         }
     }
 
+    /// <summary>
+    /// Sends the session settings in the same round trip as the statement. Only for <c>ExecuteUpdate</c> and
+    /// <c>ExecuteDelete</c>: <c>SaveChanges</c> reads rows affected by statement index, so a leading statement
+    /// would hide stale rows from its concurrency check, and raw SQL may not be allowed in a multi-statement
+    /// command at all (<c>VACUUM</c>).
+    /// </summary>
+    private bool TryCombineSession(DbCommand command, CommandEventData eventData)
+    {
+        if (eventData.CommandSource is not (CommandSource.ExecuteUpdate or CommandSource.ExecuteDelete))
+        {
+            return false;
+        }
+
+        command.CommandText = SetSessionSql + ";" + Environment.NewLine + command.CommandText;
+        AddSessionParameters(command, Classify(eventData.CommandSource, TriggerCapture.IsSuppressed).Suppress);
+
+        return true;
+    }
+
     private DbCommand? CreateSessionCommand(DbCommand command, CommandEventData eventData)
     {
         var (publish, suppress) = Classify(eventData.CommandSource, TriggerCapture.IsSuppressed);
@@ -145,24 +178,29 @@ public sealed class AuditSessionInterceptor(AuditContext context) : DbCommandInt
         session.Transaction = command.Transaction;
         session.CommandText = SetSessionSql;
 
-        Add(session, "suppress", suppress ? "on" : null);
-        Add(session, "operation", context.Operation);
-        Add(session, "actor_kind", context.ActorKind.ToString());
-        Add(session, "actor_id", context.ActorId?.ToString(CultureInfo.InvariantCulture));
-        Add(session, "actor_display", context.ActorDisplay);
-        Add(session, "on_behalf_of_customer_id", context.OnBehalfOfCustomerId?.ToString(CultureInfo.InvariantCulture));
-        Add(session, "channel", context.Channel?.ToString());
-        Add(session, "ip_address", context.IpAddress);
-        Add(session, "user_agent", context.UserAgent);
+        AddSessionParameters(session, suppress);
 
         return session;
+    }
+
+    private void AddSessionParameters(DbCommand target, bool suppress)
+    {
+        Add(target, "suppress", suppress ? "on" : null);
+        Add(target, "operation", context.Operation);
+        Add(target, "actor_kind", context.ActorKind.ToString());
+        Add(target, "actor_id", context.ActorId?.ToString(CultureInfo.InvariantCulture));
+        Add(target, "actor_display", context.ActorDisplay);
+        Add(target, "on_behalf_of_customer_id", context.OnBehalfOfCustomerId?.ToString(CultureInfo.InvariantCulture));
+        Add(target, "channel", context.Channel?.ToString());
+        Add(target, "ip_address", context.IpAddress);
+        Add(target, "user_agent", context.UserAgent);
     }
 
     // '' rather than NULL: set_config(…, NULL, …) is an error, and audit.ctx() reads '' back as NULL.
     private static void Add(DbCommand command, string name, string? value)
     {
         var parameter = command.CreateParameter();
-        parameter.ParameterName = name;
+        parameter.ParameterName = ParameterPrefix + name;
         parameter.Value = value ?? string.Empty;
         command.Parameters.Add(parameter);
     }
